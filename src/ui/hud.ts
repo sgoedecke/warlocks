@@ -1,14 +1,15 @@
 import {
-  ARENA_START_RADIUS, PLAYER_COLORS, SPELLS, SPELL_ORDER, WARLOCK_HP, upgradePrice, type SpellId,
+  ICE_TILE, ITEMS, MAP_MAX, MAP_MIN, TILE_SIZE, PLAYER_COLORS, SPELLS, WARLOCK_CARD, WARLOCK_HP, productName, spellCooldown, spellPrice, type ItemId, type ProductId, type SpellId,
 } from '../config';
 import type { Sim } from '../sim/game';
 import type { GameEvent, Warlock } from '../sim/types';
-import { goldIcon, spellIcon } from '../render/textures';
+import { btnIcon, goldIcon, spellIcon } from '../render/textures';
 import type { GameRenderer } from '../render/renderer';
 
 export interface HudCallbacks {
   onSpell: (id: SpellId) => void;
-  onBuy: (id: SpellId) => void;
+  onBuy: (id: ProductId) => void;
+  onToggle?: (spell: 'firespray' | 'splitter') => void;
   onReady: () => void;
   onMinimap: (x: number, y: number, button: number) => void;
   onPause: () => void;
@@ -25,7 +26,42 @@ interface FloatText {
   t: number;
 }
 
-const MINIMAP_EXTENT = 1400;
+const MINIMAP_EXTENT = MAP_MAX;
+
+// The original shop is a row of per-player shop units whose command cards hold the
+// researches/items (object data u000-u003). Navigation swaps the shop unit; on the
+// sub-shops the same ability goes back to the Merchant. Slots are 4x3, row-major.
+type ShopPage = 'merchant' | 'spells1' | 'spells2' | 'items';
+type ShopSlot = ProductId | `nav:${ShopPage}` | 'toggle:firespray' | 'toggle:splitter' | null;
+const BTN = 'ReplaceableTextures\\CommandButtons\\';
+const SHOP_LAYOUT: Record<ShopPage, { title: string; icon: string; slots: ShopSlot[] }> = {
+  merchant: {
+    title: 'Merchant', icon: `${BTN}BTNAcolyte.blp`,
+    slots: ['nav:items', 'nav:spells1', 'nav:spells2', null, 'inventory', null, null, null, 'rangeMastery', 'lifestealMastery', 'aoeMastery', null],
+  },
+  spells1: {
+    title: 'Spells 1', icon: `${BTN}BTNNecromancerAdept.blp`,
+    slots: ['nav:merchant', 'lightning', 'teleport', 'drain', 'fireball', 'boomerang', 'thrust', 'firespray', 'toggle:firespray', 'homing', 'displacement', 'bouncer'],
+  },
+  spells2: {
+    title: 'Spells 2', icon: `${BTN}BTNTomeOfRetraining.blp`,
+    slots: ['nav:merchant', 'meteor', 'rush', 'link', null, 'windwalk', 'shield', 'freeze', 'toggle:splitter', 'splitter', 'timeshift', 'gravity'],
+  },
+  items: {
+    title: 'Items', icon: `${BTN}BTNDust.blp`,
+    slots: ['nav:merchant', 'pendant', 'boots', 'helm', null, 'cape', 'soj', 'sword', null, 'staff', 'mask', 'aegis'],
+  },
+};
+const MERCHANT_ICONS = {
+  inventory: `${BTN}BTNPackBeast.blp`,
+  rangeMastery: 'ReplaceableTextures\\PassiveButtons\\PASBTNTrueShot.blp',
+  lifestealMastery: 'ReplaceableTextures\\PassiveButtons\\PASBTNMagicImmunity.blp',
+  aoeMastery: 'ReplaceableTextures\\PassiveButtons\\PASBTNScatterRockets.blp',
+};
+export const SHOP_ICON_PATHS = [
+  ...Object.values(SHOP_LAYOUT).map((p) => p.icon), ...Object.values(MERCHANT_ICONS),
+  `${BTN}BTNHumanCaptureFlag.blp`, `${BTN}BTNHire.blp`,
+];
 
 function esc(s: string) {
   return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
@@ -43,10 +79,12 @@ export class Hud {
   private mg: CanvasRenderingContext2D;
   private els: Record<string, HTMLElement> = {};
   private cmdButtons = new Map<SpellId, HTMLElement>();
-  private shopItems = new Map<SpellId, HTMLElement>();
+  private shopItems = new Map<ProductId, HTMLElement>();
+  private shopCells: { page: ShopPage; el: HTMLElement; toggle?: 'firespray' | 'splitter' }[] = [];
+  private shopPage: ShopPage = 'merchant';
   private floats: FloatText[] = [];
   private mbTimer = 0;
-  private hoverSpell: { id: SpellId; shop: boolean } | null = null;
+  private hoverProduct: { id: ProductId | `nav:${ShopPage}` | `toggle:${'firespray' | 'splitter'}`; shop: boolean } | null = null;
   private centerTimer = 0;
   private errorTimer = 0;
   private gold = goldIcon();
@@ -92,8 +130,8 @@ export class Hud {
         <div class="command-card"></div>
       </div>
       <div class="shop frame hidden">
-        <h2>Spell Shop</h2>
-        <div class="sub">Click a spell to learn or upgrade it. Hover for details.</div>
+        <h2 data-el="shopTitle">Merchant</h2>
+        <div class="sub">Click to buy. Hover for details.</div>
         <div class="shop-grid"></div>
         <div class="shop-footer">
           <div class="gold"><img src="${this.gold}"><span data-el="shopGold">0</span> gold</div>
@@ -187,7 +225,7 @@ export class Hud {
 
   private buildCommandCard(card: HTMLElement) {
     const slots: (SpellId | null)[] = Array(12).fill(null);
-    for (const id of SPELL_ORDER) slots[SPELLS[id].row * 4 + SPELLS[id].col] = id;
+    WARLOCK_CARD.forEach((id, i) => (slots[i] = id));
     for (const id of slots) {
       const b = document.createElement('div');
       b.className = 'cmd empty';
@@ -199,8 +237,8 @@ export class Hud {
         e.stopPropagation();
         if (e.button === 0 && !b.classList.contains('empty')) this.cb.onSpell(id);
       });
-      b.addEventListener('mouseenter', () => (this.hoverSpell = { id, shop: false }));
-      b.addEventListener('mouseleave', () => (this.hoverSpell = null));
+      b.addEventListener('mouseenter', () => (this.hoverProduct = { id, shop: false }));
+      b.addEventListener('mouseleave', () => (this.hoverProduct = null));
       this.cmdButtons.set(id, b);
     }
   }
@@ -213,18 +251,51 @@ export class Hud {
   }
 
   private buildShop(grid: HTMLElement) {
-    for (const id of SPELL_ORDER) {
-      const it = document.createElement('div');
-      it.className = 'shop-item';
-      it.innerHTML = `<div class="icon" style="background-image:url(${spellIcon(id)})"></div><div class="label">${SPELLS[id].name}</div><div class="pips"></div><div class="price"></div>`;
-      it.addEventListener('mousedown', (e) => {
-        if (e.button === 0) this.cb.onBuy(id);
+    for (const page of Object.keys(SHOP_LAYOUT) as ShopPage[]) {
+      SHOP_LAYOUT[page].slots.forEach((slot, i) => {
+        const it = document.createElement('div');
+        it.className = 'shop-item';
+        it.style.gridColumn = String((i % 4) + 1);
+        it.style.gridRow = String(Math.floor(i / 4) + 1);
+        this.shopCells.push({ page, el: it, toggle: slot?.startsWith('toggle:') ? slot.slice(7) as 'firespray' | 'splitter' : undefined });
+        grid.appendChild(it);
+        if (!slot) return;
+        if (slot.startsWith('nav:') || slot.startsWith('toggle:')) {
+          const nav = slot.startsWith('nav:') ? slot.slice(4) as ShopPage : null;
+          const label = nav ? (page === 'merchant' ? SHOP_LAYOUT[nav].title : 'Back') : 'Toggle mode';
+          const icon = nav ? btnIcon(page === 'merchant' ? SHOP_LAYOUT[nav].icon : SHOP_LAYOUT.merchant.icon)
+            : btnIcon(slot === 'toggle:firespray' ? 'ReplaceableTextures\\CommandButtons\\BTNHumanCaptureFlag.blp' : 'ReplaceableTextures\\CommandButtons\\BTNHire.blp');
+          it.classList.add('nav');
+          it.innerHTML = `<div class="icon" style="background-image:url(${icon})"></div><div class="label">${label}</div><div class="price"></div>`;
+          it.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
+            if (nav) this.setShopPage(nav);
+            else this.cb.onToggle?.(slot.slice(7) as 'firespray' | 'splitter');
+          });
+          it.addEventListener('mouseenter', () => (this.hoverProduct = { id: slot as `nav:${ShopPage}`, shop: true }));
+          it.addEventListener('mouseleave', () => (this.hoverProduct = null));
+          return;
+        }
+        const id = slot as ProductId;
+        const isSpell = id in SPELLS;
+        const icon = isSpell ? spellIcon(id as SpellId) : id in ITEMS ? btnIcon(ITEMS[id as ItemId].icon) : btnIcon(MERCHANT_ICONS[id as keyof typeof MERCHANT_ICONS]);
+        it.innerHTML = `<div class="icon" style="background-image:url(${icon})"></div><div class="label">${productName(id)}</div><div class="pips"></div><div class="price"></div>`;
+        it.addEventListener('mousedown', (e) => {
+          if (e.button === 0) this.cb.onBuy(id);
+        });
+        it.addEventListener('mouseenter', () => (this.hoverProduct = { id, shop: true }));
+        it.addEventListener('mouseleave', () => (this.hoverProduct = null));
+        this.shopItems.set(id, it);
       });
-      it.addEventListener('mouseenter', () => (this.hoverSpell = { id, shop: true }));
-      it.addEventListener('mouseleave', () => (this.hoverSpell = null));
-      grid.appendChild(it);
-      this.shopItems.set(id, it);
     }
+    this.setShopPage('merchant');
+  }
+
+  private setShopPage(page: ShopPage) {
+    this.shopPage = page;
+    this.els.shopTitle.textContent = SHOP_LAYOUT[page].title;
+    for (const c of this.shopCells) c.el.classList.toggle('off-page', c.page !== page);
+    this.hoverProduct = null;
   }
 
   private bindMinimap() {
@@ -288,6 +359,15 @@ export class Hud {
       case 'bounty':
         if (e.pid === this.localId) this.floats.push({ text: `+${e.gold}`, color: '#ffcc00', x: e.x, y: e.y, t: 0 });
         break;
+      case 'damageText': {
+        const color = e.color === 'cyan' ? '#70e8ff' : e.color === 'green' ? '#38ff68' : e.color === 'red' ? '#ff5050' : '#ffd840';
+        this.floats.push({ text: e.text, color, x: e.x, y: e.y, t: 0 });
+        break;
+      }
+      case 'announcement':
+        this.center(e.text, 1.8);
+        this.message(`<span style="color:#ffcc00">${esc(e.text)}</span>`, 6);
+        break;
       case 'roundWinner':
         if (e.pid >= 0) {
           const w = P(e.pid);
@@ -312,7 +392,7 @@ export class Hud {
       case 'buy':
         if (e.pid === this.localId) {
           const l = e.level;
-          this.message(`You ${l === 1 ? 'learned' : 'upgraded'} <span style="color:#ffcc00">${SPELLS[e.spell].name}</span>${l > 1 ? ` to level ${l}` : ''}.`, 5);
+          this.message(`You bought <span style="color:#ffcc00">${productName(e.product)}</span>${l > 1 ? ` level ${l}` : ''}.`, 5);
         }
         break;
       default:
@@ -389,9 +469,8 @@ export class Hud {
         continue;
       }
       b.style.backgroundImage = `url(${spellIcon(id)})`;
-      const def = SPELLS[id];
       const cd = me.cooldowns[id] ?? 0;
-      const total = def.cooldown(lvl);
+      const total = spellCooldown(id, lvl);
       (b.querySelector('.cd') as HTMLElement).style.setProperty('--p', cd > 0 ? String(1 - cd / total) : '1');
       const txt = cd > 0 ? (cd < 1 ? cd.toFixed(1) : String(Math.ceil(cd))) : '';
       const ct = b.querySelector('.cd-text') as HTMLElement;
@@ -413,19 +492,34 @@ export class Hud {
         : `Round ${sim.round} starts in ${Math.ceil(Math.max(0, sim.phaseTimer))}`;
       (this.root.querySelector('[data-act="ready"]') as HTMLButtonElement).disabled = me.ready;
       for (const [id, it] of this.shopItems) {
-        const lvl = me.spells[id] ?? 0;
-        const def = SPELLS[id];
-        const max = lvl >= def.maxLevel;
-        const price = upgradePrice(id, lvl);
-        const pips = Array.from({ length: def.maxLevel }, (_, i) => `<i class="${i < lvl ? 'on' : ''}"></i>`).join('');
+        const isSpell = id in SPELLS;
+        const lvl = isSpell ? (me.spells[id as SpellId] ?? 0) : id in ITEMS ? (me.itemSlots.find((s) => s.id === id)?.level ?? 0) : id === 'inventory' ? me.inventoryLevel : id === 'rangeMastery' ? me.IA : id === 'aoeMastery' ? me.AA : me.RA;
+        const maxLevel = isSpell ? SPELLS[id as SpellId].maxLevel : id in ITEMS ? ITEMS[id as keyof typeof ITEMS].max : id === 'inventory' ? 3 : 9;
+        const max = lvl >= maxLevel;
+        // Learning one spell of a hotkey column removes the others from the shop.
+        const column = isSpell ? SPELLS[id as SpellId].column : 'core';
+        const locked = column !== 'core' && !!me.chosen[column] && me.chosen[column] !== id;
+        const price = isSpell ? spellPrice(id as SpellId, lvl) : id in ITEMS ? (ITEMS[id as keyof typeof ITEMS].costs[lvl] ?? 999) : id === 'inventory' ? 3 : 8 + 2 * lvl;
+        const pips = Array.from({ length: Math.min(maxLevel, 12) }, (_, i) => `<i class="${i < lvl ? 'on' : ''}"></i>`).join('');
         const pe = it.querySelector('.pips') as HTMLElement;
         if (pe.innerHTML !== pips) pe.innerHTML = pips;
         const pr = it.querySelector('.price') as HTMLElement;
-        const ptxt = max ? 'Max level' : `${lvl ? 'Upgrade' : 'Learn'}: ${price}`;
+        const ptxt = locked ? 'Unavailable' : max ? 'Max level' : `${lvl ? 'Upgrade' : 'Learn'}: ${price}`;
         if (pr.textContent !== ptxt) pr.textContent = ptxt;
-        pr.classList.toggle('max', max);
-        it.classList.toggle('unaffordable', !max && price > me.gold);
+        pr.classList.toggle('max', max && !locked);
+        it.classList.toggle('locked', locked);
+        it.classList.toggle('unaffordable', !max && !locked && price > me.gold);
       }
+      for (const c of this.shopCells) {
+        if (!c.toggle) continue;
+        const learned = (me.spells[c.toggle] ?? 0) > 0;
+        c.el.classList.toggle('hidden', !learned);
+        const mode = c.toggle === 'firespray' ? (me.fireSprayFan ? 'Fan' : 'Stream') : (me.splitterContinuous ? 'Continuous' : 'Normal');
+        const pr = c.el.querySelector('.price') as HTMLElement;
+        if (pr.textContent !== mode) pr.textContent = mode;
+      }
+    } else if (this.shopPage !== 'merchant') {
+      this.setShopPage('merchant');
     }
 
     this.updateTooltip(me);
@@ -442,23 +536,47 @@ export class Hud {
 
   private updateTooltip(me: Warlock) {
     const tt = this.els.tooltip;
-    if (!this.hoverSpell) {
+    if (!this.hoverProduct) {
       tt.classList.add('hidden');
       return;
     }
-    const { id, shop } = this.hoverSpell;
-    const def = SPELLS[id];
-    const lvl = me.spells[id] ?? 0;
+    const { id, shop } = this.hoverProduct;
+    if (id.startsWith('nav:') || id.startsWith('toggle:')) {
+      const target = id.slice(4) as ShopPage;
+      const html = id.startsWith('nav:')
+        ? `<div class="tt-title">${this.shopPage === 'merchant' ? SHOP_LAYOUT[target].title : 'Back to Merchant'}</div>`
+        : `<div class="tt-title">Toggle ${id === 'toggle:firespray' ? 'Fire Spray' : 'Splitter'} mode</div><div>${id === 'toggle:firespray' ? 'Switches between a stream and a fan of fireballs.' : 'Switches between the normal and the continuous splitter.'}</div>`;
+      if (tt.innerHTML !== html) tt.innerHTML = html;
+      tt.classList.remove('hidden');
+      this.placeTooltip(shop);
+      return;
+    }
+    if (!(id in SPELLS)) {
+      const item = id in ITEMS ? ITEMS[id as keyof typeof ITEMS] : null;
+      const html = `<div class="tt-title">${productName(id as ProductId)}</div><div>${item?.tooltip ?? 'Permanent upgrade from the Merchant.'}</div>`;
+      if (tt.innerHTML !== html) tt.innerHTML = html;
+      tt.classList.remove('hidden');
+      this.placeTooltip(shop);
+      return;
+    }
+    const spellId = id as SpellId;
+    const def = SPELLS[spellId];
+    const lvl = me.spells[spellId] ?? 0;
     const showLvl = shop ? Math.min(def.maxLevel, lvl + 1) : Math.max(1, lvl);
     let cost = '';
     if (shop) {
       cost = lvl >= def.maxLevel
         ? `<div class="tt-cost">Maximum level reached</div>`
-        : `<div class="tt-cost"><img src="${this.gold}">${upgradePrice(id, lvl)}</div>`;
+        : `<div class="tt-cost"><img src="${this.gold}">${spellPrice(spellId, lvl)}</div>`;
     }
-    const html = `<div class="tt-title">${shop ? (lvl ? 'Upgrade ' : 'Learn ') : ''}${def.name} (<span class="hk">${def.hotkey}</span>) - [Level ${showLvl}]</div>${cost}<div>${def.describe(showLvl)}</div><div class="tt-cd">Cooldown: ${def.cooldown(showLvl).toFixed(1)} seconds</div>`;
+    const html = `<div class="tt-title">${shop ? (lvl ? 'Upgrade ' : 'Learn ') : ''}${def.name} (<span class="hk">${def.hotkey}</span>) - [Level ${showLvl}]</div>${cost}<div>${def.tooltip}</div><div class="tt-cd">Cooldown: ${spellCooldown(spellId, showLvl).toFixed(1)} seconds</div>`;
     if (tt.innerHTML !== html) tt.innerHTML = html;
     tt.classList.remove('hidden');
+    this.placeTooltip(shop);
+  }
+
+  private placeTooltip(shop: boolean) {
+    const tt = this.els.tooltip;
     if (shop) {
       // Sit beside the shop panel, or over its top-right corner if the window is narrow.
       const r = this.els.shop.getBoundingClientRect();
@@ -493,7 +611,7 @@ export class Hud {
     // WC3 style health bars: fixed pixel size, colour shifts green -> yellow -> red.
     for (const p of this.sim.players) {
       if (!p.alive || (p.windwalk > 0 && p.id !== this.localId)) continue;
-      const s = this.renderer.worldToScreen(p.x, p.y, 118);
+      const s = this.renderer.worldToScreen(p.x, p.y, 150);
       if (!s.visible) continue;
       const bw = 56;
       const bh = 6;
@@ -528,26 +646,34 @@ export class Hud {
     this.floats = this.floats.filter((f) => f.t < 2);
   }
 
+  private minimapTerrain = document.createElement('canvas');
+  private minimapTerrainVersion = -1;
+
+  /** WC3 minimaps show the playable map's tiles; Warlocks' arena is the painted square in the middle. */
+  private paintMinimapTerrain() {
+    const c = this.minimapTerrain;
+    const n = Math.round((MAP_MAX - MAP_MIN) / TILE_SIZE);
+    c.width = c.height = n;
+    const g = c.getContext('2d')!;
+    const { lava, safe, lavaColor, safeColor } = this.sim.theme;
+    const css = (h: number) => `#${h.toString(16).padStart(6, '0')}`;
+    for (let ty = 0; ty < n; ty++) for (let tx = 0; tx < n; tx++) {
+      const code = this.sim.terrainAt(MAP_MIN + (tx + 0.5) * TILE_SIZE, MAP_MIN + (ty + 0.5) * TILE_SIZE);
+      g.fillStyle = code === lava ? css(lavaColor) : code === safe ? css(safeColor) : code === ICE_TILE ? '#3a6890' : '#000';
+      g.fillRect(tx, n - 1 - ty, 1, 1);
+    }
+  }
+
   private drawMinimap() {
     const g = this.mg;
     const S = this.minimap.width;
     const toM = (x: number, y: number) => [((x / MINIMAP_EXTENT) + 1) * S / 2, (1 - y / MINIMAP_EXTENT) * S / 2];
-    g.fillStyle = '#7a1e04';
-    g.fillRect(0, 0, S, S);
-    const grd = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
-    grd.addColorStop(0, '#c04a0a');
-    grd.addColorStop(1, '#5a1402');
-    g.fillStyle = grd;
-    g.fillRect(0, 0, S, S);
-    const r = (this.sim.arenaRadius / MINIMAP_EXTENT) * S / 2;
-    g.fillStyle = '#6a5a40';
-    g.beginPath();
-    g.arc(S / 2, S / 2, r, 0, Math.PI * 2);
-    g.fill();
-    g.fillStyle = '#7d6c50';
-    g.beginPath();
-    g.arc(S / 2, S / 2, (ARENA_START_RADIUS * 0.35 / MINIMAP_EXTENT) * S / 2, 0, Math.PI * 2);
-    g.fill();
+    if (this.minimapTerrainVersion !== this.sim.terrainVersion) {
+      this.minimapTerrainVersion = this.sim.terrainVersion;
+      this.paintMinimapTerrain();
+    }
+    g.imageSmoothingEnabled = false;
+    g.drawImage(this.minimapTerrain, 0, 0, S, S);
     for (const p of this.sim.players) {
       if (!p.alive || (p.windwalk > 0 && p.id !== this.localId)) continue;
       const [x, y] = toM(p.x, p.y);

@@ -1,93 +1,24 @@
 import * as THREE from 'three';
-import { ARENA_START_RADIUS, PLAYER_COLORS, SPELL_STATS, WARLOCK_RADIUS } from '../config';
+import { MODEL_PATHS, PLAYER_COLORS, SPELLS, WARLOCK_RADIUS } from '../config';
 import type { Sim } from '../sim/game';
-import type { GameEvent, Projectile, ProjectileKind, Warlock } from '../sim/types';
+import type { GameEvent, Obstacle, Projectile, ProjectileKind, Warlock } from '../sim/types';
 import { ParticleSystem, type ParticleSpec } from './particles';
-import {
-  makeDirtTexture, makeGlowTexture, makeRingTexture, makeRockTexture, makeScorchTexture, makeShadowTexture,
-  makeStoneTexture,
-} from './textures';
+import { makeGlowTexture, makeRingTexture, makeScorchTexture, makeShadowTexture } from './textures';
+import { ModelLibrary } from './models';
+import type { MdxInstance } from './mdx';
+import { TerrainView } from './terrain';
 import { WarlockModel } from './unitModel';
 
 // WC3 default game camera: angle of attack 304 (56 degrees down), distance 1650.
 const CAM_PITCH = (56 * Math.PI) / 180;
 const CAM_FOV = 48;
-const PROJ_HEIGHT = 56;
+// Missile art is attached to the e000 dummy, whose fly height is 65.
+const PROJ_HEIGHT = 65;
+// h000 'Warlock': BloodelfWizard.mdl at usca 0.92.
+const WARLOCK_MODEL = 'BloodelfWizard.mdl';
+const WARLOCK_SCALE = 0.92;
 // WC3 heroes are drawn noticeably larger than their collision size.
 const UNIT_SCALE = 1.45;
-
-const NOISE_GLSL = /* glsl */ `
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123); }
-float noise(vec2 p) {
-  vec2 i = floor(p); vec2 f = fract(p);
-  vec2 u = f * f * (3.0 - 2.0 * f);
-  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
-}
-float fbm(vec2 p) {
-  float s = 0.0; float a = 0.5;
-  for (int i = 0; i < 5; i++) { s += a * noise(p); p = p * 2.03 + vec2(1.7, 9.2); a *= 0.5; }
-  return s;
-}`;
-
-const WORLD_VERT = /* glsl */ `
-varying vec2 vW;
-void main() {
-  vec4 w = modelMatrix * vec4(position, 1.0);
-  vW = vec2(w.x, -w.z);
-  gl_Position = projectionMatrix * viewMatrix * w;
-}`;
-
-const GROUND_FRAG = /* glsl */ `
-uniform sampler2D uDirt;
-uniform sampler2D uStone;
-uniform float uRadius;
-uniform float uTime;
-varying vec2 vW;
-${NOISE_GLSL}
-void main() {
-  float d = length(vW);
-  vec2 dir = vW / max(d, 0.001);
-  float n = noise(dir * 3.0 + 10.0) * 0.6 + noise(dir * 9.0 + 3.0) * 0.4;
-  float edge = uRadius + (n - 0.5) * 34.0;
-  if (d > edge) discard;
-  vec2 uv = vW / 300.0;
-  vec3 dirt = texture2D(uDirt, uv * 0.9).rgb;
-  vec3 stone = texture2D(uStone, uv).rgb;
-  float plaza = smoothstep(${(ARENA_START_RADIUS * 0.5).toFixed(1)}, ${(ARENA_START_RADIUS * 0.3).toFixed(1)}, d + (fbm(vW / 220.0) - 0.5) * 260.0);
-  float patches = smoothstep(0.45, 0.6, fbm(vW / 380.0 + 4.0));
-  vec3 col = mix(dirt, stone, clamp(plaza + patches * 0.7, 0.0, 1.0));
-  col *= 1.0 + 0.35 * fbm(vW / 700.0);
-  // Scorched, glowing rim where the lava is eating the ground
-  float scorch = smoothstep(edge - 90.0, edge - 4.0, d);
-  col *= 1.0 - 0.7 * scorch;
-  float pulse = 0.8 + 0.2 * sin(uTime * 3.0 + atan(dir.y, dir.x) * 7.0);
-  float glow = smoothstep(edge - 22.0, edge, d);
-  col += vec3(1.0, 0.35, 0.05) * glow * 1.4 * pulse;
-  col += vec3(0.5, 0.12, 0.0) * scorch * 0.35;
-  gl_FragColor = vec4(col, 1.0);
-}`;
-
-const LAVA_FRAG = /* glsl */ `
-uniform float uTime;
-uniform float uRadius;
-varying vec2 vW;
-${NOISE_GLSL}
-void main() {
-  vec2 p = vW / 260.0;
-  float t = uTime;
-  float n1 = fbm(p + vec2(t * 0.05, t * 0.035));
-  float n2 = fbm(p * 2.2 - vec2(t * 0.07, -t * 0.04) + n1 * 2.5);
-  float heat = n2 * 0.8 + n1 * 0.45;
-  float veins = 1.0 - abs(noise(p * 3.0 + n1 * 3.0 + t * 0.05) - 0.5) * 2.0;
-  heat += pow(veins, 6.0) * 0.35;
-  vec3 crust = vec3(0.16, 0.035, 0.01);
-  vec3 hot = mix(vec3(0.8, 0.17, 0.02), vec3(1.0, 0.72, 0.25), smoothstep(0.72, 1.05, heat));
-  vec3 col = mix(crust, hot, smoothstep(0.46, 0.78, heat));
-  float d = length(vW);
-  col *= 1.0 + 0.35 * exp(-max(0.0, d - uRadius) / 90.0);
-  col = mix(col, vec3(0.07, 0.015, 0.0), smoothstep(2200.0, 3600.0, d));
-  gl_FragColor = vec4(col, 1.0);
-}`;
 
 function sim2three(x: number, y: number, h = 0): THREE.Vector3 {
   return new THREE.Vector3(x, h, -y);
@@ -114,8 +45,55 @@ function disposeObj(obj: THREE.Object3D) {
   });
 }
 
+/** Stand-ins for the base-game obstacle doodads (columns, rock pillars, barrens trees). */
+function proceduralObstacle(o: Obstacle): THREE.Object3D {
+  const g = new THREE.Group();
+  const type = Number(o.variant.slice(3)) || 0;
+  const stone = (c: number) => new THREE.MeshLambertMaterial({ color: c });
+  if (type === 4 || type === 5) {
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(9, 14, 90, 7), stone(0x5a4128));
+    trunk.position.y = 45;
+    const crown = new THREE.Mesh(new THREE.IcosahedronGeometry(50, 0), stone(type === 4 ? 0x5d6b2a : 0x6f7a35));
+    crown.scale.set(1.2, 0.55, 1.2);
+    crown.position.y = 100;
+    g.add(trunk, crown);
+  } else if (type === 2 || type === 3 || type === 8 || type === 9) {
+    const geo = new THREE.CylinderGeometry(18, 34, type === 3 || type === 9 ? 120 : 150, 7, 4);
+    const pos = geo.attributes.position as THREE.BufferAttribute;
+    for (let i = 0; i < pos.count; i++) {
+      const h = Math.sin(i * 12.9898 + type) * 43758.5453;
+      const j = (h - Math.floor(h) - 0.5) * 10;
+      pos.setXYZ(i, pos.getX(i) + j, pos.getY(i) + j * 0.5, pos.getZ(i) - j);
+    }
+    geo.computeVertexNormals();
+    const rock = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: type >= 8 ? 0x6b4a3a : 0x7a6a58, flatShading: true }));
+    rock.position.y = (geo.parameters.height as number) / 2 - 4;
+    g.add(rock);
+  } else {
+    const ruined = type === 0 || type === 6;
+    const h = ruined ? 100 : 170;
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(20, 22, h, 12), stone(type >= 6 ? 0x8d8678 : 0xb4ae9e));
+    shaft.position.y = h / 2 + 12;
+    const base = new THREE.Mesh(new THREE.BoxGeometry(56, 14, 56), stone(0x8f8a7c));
+    base.position.y = 7;
+    g.add(shaft, base);
+    if (!ruined) {
+      const cap = new THREE.Mesh(new THREE.BoxGeometry(50, 12, 50), stone(0x9f9a8c));
+      cap.position.y = h + 18;
+      g.add(cap);
+    }
+  }
+  g.scale.setScalar(o.scale);
+  g.rotation.y = o.facing;
+  g.position.set(o.x, 0, -o.y);
+  return g;
+}
+
 interface UnitView {
   model: WarlockModel;
+  mdx: MdxInstance | null;
+  seq: string;
+  spellT: number;
   shadow: THREE.Mesh;
   bubble: THREE.Mesh;
   moving: number;
@@ -129,6 +107,7 @@ interface UnitView {
 
 interface ProjView {
   obj: THREE.Group;
+  mdx: MdxInstance | null;
   kind: ProjectileKind;
   carry: number;
   chain?: THREE.Mesh;
@@ -149,8 +128,10 @@ export class GameRenderer {
   camY = 0;
   camDist = 1650;
   private shake = 0;
-  private groundMat: THREE.ShaderMaterial;
-  private lavaMat: THREE.ShaderMaterial;
+  private terrain = new TerrainView();
+  readonly lib: ModelLibrary;
+  private obstacleViews: { obs: Obstacle; obj: THREE.Object3D; mdx: boolean }[] = [];
+  private obstacleSet: Obstacle[] | null = null;
   private units = new Map<number, UnitView>();
   private projs = new Map<number, ProjView>();
   private transients: Transient[] = [];
@@ -166,6 +147,8 @@ export class GameRenderer {
   private portraitScene = new THREE.Scene();
   private portraitCam = new THREE.PerspectiveCamera(32, 1, 1, 1000);
   private portraitModel: WarlockModel | null = null;
+  private portraitMdx: MdxInstance | null = null;
+  private portraitSeq = '';
   private portraitColor = -1;
   private portraitRenderer: THREE.WebGLRenderer;
   private portraitEl: HTMLElement | null = null;
@@ -219,31 +202,9 @@ export class GameRenderer {
     this.scene.add(new THREE.HemisphereLight(0xb8b0c8, 0xff5a10, 1.1));
     this.scene.add(new THREE.AmbientLight(0x403030, 0.8));
 
-    // Lava sea
-    this.lavaMat = new THREE.ShaderMaterial({
-      vertexShader: WORLD_VERT, fragmentShader: LAVA_FRAG,
-      uniforms: { uTime: { value: 0 }, uRadius: { value: ARENA_START_RADIUS } },
-    });
-    const lava = new THREE.Mesh(new THREE.PlaneGeometry(9000, 9000), this.lavaMat);
-    lava.rotation.x = -Math.PI / 2;
-    lava.position.y = -7;
-    this.scene.add(lava);
-
-    // Arena ground
-    this.groundMat = new THREE.ShaderMaterial({
-      vertexShader: WORLD_VERT, fragmentShader: GROUND_FRAG,
-      uniforms: {
-        uDirt: { value: canvasTex(makeDirtTexture(), true) },
-        uStone: { value: canvasTex(makeStoneTexture(), true) },
-        uRadius: { value: ARENA_START_RADIUS },
-        uTime: { value: 0 },
-      },
-    });
-    const ground = new THREE.Mesh(new THREE.CircleGeometry(ARENA_START_RADIUS + 40, 128), this.groundMat);
-    ground.rotation.x = -Math.PI / 2;
-    this.scene.add(ground);
-
-    this.buildCliffs(canvasTex(makeRockTexture(), true));
+    this.scene.add(this.terrain.mesh);
+    this.lib = new ModelLibrary(this.scene);
+    this.lib.preload([WARLOCK_MODEL, 'fb2.mdl', ...Object.values(MODEL_PATHS), ...Object.values(SPELLS).map((s) => s.modelPath)]);
 
     this.fx = new ParticleSystem(5000, this.tex.glow, true);
     this.smoke = new ParticleSystem(2500, this.tex.glow, false);
@@ -293,34 +254,6 @@ export class GameRenderer {
   attachPortrait(el: HTMLElement) {
     this.portraitEl = el;
     el.appendChild(this.portraitRenderer.domElement);
-  }
-
-  private buildCliffs(rockTex: THREE.Texture) {
-    const inner = 2000;
-    const outer = 4200;
-    const geo = new THREE.RingGeometry(inner, outer, 160, 14);
-    const pos = geo.attributes.position as THREE.BufferAttribute;
-    const colors: number[] = [];
-    const uvs = geo.attributes.uv as THREE.BufferAttribute;
-    for (let i = 0; i < pos.count; i++) {
-      const x = pos.getX(i);
-      const y = pos.getY(i);
-      const r = Math.hypot(x, y);
-      const a = Math.atan2(y, x);
-      const k = (r - inner) / (outer - inner);
-      const n = Math.sin(a * 7) * 0.5 + Math.sin(a * 17 + 1.3) * 0.3 + Math.sin(a * 31 + r * 0.01) * 0.2;
-      const h = (k < 0.08 ? -40 : Math.pow(k, 0.6) * 700) * (0.75 + 0.35 * n) + Math.sin(x * 0.013) * Math.cos(y * 0.011) * 60 * k;
-      pos.setZ(i, h);
-      uvs.setXY(i, x / 400, y / 400);
-      const glow = Math.max(0, 1 - k * 6);
-      colors.push(0.55 + glow * 0.9, 0.5 + glow * 0.25, 0.48);
-    }
-    geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-    geo.computeVertexNormals();
-    const cliffs = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: rockTex, vertexColors: true }));
-    cliffs.rotation.x = -Math.PI / 2;
-    cliffs.position.y = -10;
-    this.scene.add(cliffs);
   }
 
   resize() {
@@ -389,11 +322,9 @@ export class GameRenderer {
       new THREE.SphereGeometry(40, 20, 14),
       new THREE.MeshBasicMaterial({ color: 0x60a0ff, transparent: true, opacity: 0.25, blending: THREE.AdditiveBlending, depthWrite: false }),
     );
-    bubble.position.y = 32;
     bubble.visible = false;
-    model.root.add(bubble);
-    this.scene.add(model.root, shadow);
-    this.units.set(p.id, { model, shadow, bubble, moving: 0, casting: 0, knocked: 0, flash: 0, deadT: 0, emitCarry: 0, wasAlive: true });
+    this.scene.add(model.root, shadow, bubble);
+    this.units.set(p.id, { model, mdx: null, seq: '', spellT: 0, shadow, bubble, moving: 0, casting: 0, knocked: 0, flash: 0, deadT: 0, emitCarry: 0, wasAlive: true });
   }
 
   private updateUnits(alpha: number, dt: number) {
@@ -409,17 +340,38 @@ export class GameRenderer {
       }
       v.wasAlive = p.alive;
       const k = 1 - Math.exp(-dt * 12);
-      const moveSpeed = Math.hypot(p.mvx, p.mvy);
+      const moveSpeed = Math.hypot(p.mvx, p.mvy) / 0.03;
       v.moving += ((moveSpeed > 20 && !p.thrust ? 1 : 0) - v.moving) * k;
       const casting = p.cast || this.sim.time - p.lastCastTime < 0.3 || p.thrust ? 1 : 0;
       v.casting += (casting - v.casting) * k * 1.5;
-      const kbSpeed = Math.hypot(p.vx, p.vy);
+      const kbSpeed = Math.hypot(p.vx, p.vy) / 0.03;
       v.knocked += (Math.min(1, kbSpeed / 450) - v.knocked) * k;
       v.flash = Math.max(0, v.flash - dt * 5);
 
+      if (!v.mdx) {
+        v.mdx = this.lib.instance(WARLOCK_MODEL);
+        if (v.mdx) {
+          v.mdx.scale.setScalar(WARLOCK_SCALE);
+          v.mdx.teamColor = new THREE.Color(PLAYER_COLORS[p.color].css);
+          this.scene.add(v.mdx);
+          v.seq = '';
+        }
+      }
       m.root.position.set(x, p.inLava ? -6 : 0, -y);
       m.root.rotation.y = facing;
-      m.update({ moving: v.moving, casting: v.casting, knocked: v.knocked, time: this.time + p.id * 1.7 });
+      if (v.mdx) {
+        m.root.visible = false;
+        v.spellT -= dt;
+        const want = !p.alive ? 'death' : v.spellT > 0 ? 'spell' : v.moving > 0.5 || p.thrust ? 'walk' : 'stand';
+        if (want !== v.seq) {
+          v.mdx.setSequence(want, want === 'stand' || want === 'walk');
+          v.seq = want;
+        }
+        v.mdx.position.set(x, 0, -y);
+        v.mdx.rotation.y = facing;
+      } else {
+        m.update({ moving: v.moving, casting: v.casting, knocked: v.knocked, time: this.time + p.id * 1.7 });
+      }
 
       let opacity = 1;
       let visible = true;
@@ -433,8 +385,13 @@ export class GameRenderer {
         if (p.id === this.localId) opacity = 0.4;
         else visible = false;
       }
-      m.root.visible = visible;
-      m.setOpacity(opacity);
+      if (v.mdx) {
+        v.mdx.visible = visible;
+        v.mdx.opacity = p.alive ? opacity : 1;
+      } else {
+        m.root.visible = visible;
+        m.setOpacity(opacity);
+      }
       if (p.inLava && p.alive) m.setTint(new THREE.Color(1, 0.3, 0.05), 0.35 + 0.15 * Math.sin(this.time * 12));
       else if (v.flash > 0) m.setTint(new THREE.Color(1, 1, 1), v.flash * 0.6);
       else if (!p.alive) m.setTint(new THREE.Color(0.1, 0.05, 0.05), Math.min(1, v.deadT));
@@ -442,6 +399,7 @@ export class GameRenderer {
 
       v.shadow.visible = visible && p.alive && !p.inLava;
       v.shadow.position.set(x, 0.8, -y);
+      v.bubble.position.set(x, 32 * UNIT_SCALE, -y);
       v.bubble.visible = p.alive && p.shield > 0;
       if (v.bubble.visible) {
         const s = 1 + Math.sin(this.time * 10) * 0.04;
@@ -524,7 +482,21 @@ export class GameRenderer {
 
   private createProj(pr: Projectile): ProjView {
     const g = new THREE.Group();
-    const v: ProjView = { obj: g, kind: pr.kind, carry: 0 };
+    const v: ProjView = { obj: g, kind: pr.kind, carry: 0, mdx: null };
+    const mdx = this.lib.instance(pr.modelPath);
+    if (mdx) {
+      // The missile art is an effect on the dummy's origin; it loops Stand (or Birth if that's all it has).
+      v.mdx = mdx;
+      mdx.scale.setScalar(pr.scale || 1);
+      mdx.setSequence(mdx.model.hasSequence('stand') ? 'stand' : 'birth', true);
+      g.add(mdx);
+      if (pr.kind === 'link') {
+        v.chain = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshLambertMaterial({ color: 0x707080, side: THREE.DoubleSide }));
+        this.scene.add(v.chain);
+      }
+      this.scene.add(g);
+      return v;
+    }
     switch (pr.kind) {
       case 'fireball':
         g.add(this.sprite(0xff6010, 90), this.sprite(0xffc040, 44), this.sprite(0xffffff, 18, this.tex.hardGlow));
@@ -532,7 +504,7 @@ export class GameRenderer {
       case 'homing':
         g.add(this.sprite(0x50ff20, 80), this.sprite(0xc0ff80, 34), this.sprite(0xffffff, 14, this.tex.hardGlow));
         break;
-      case 'swap':
+      case 'displacement':
         g.add(this.sprite(0x20c0ff, 70), this.sprite(0xc0ffff, 28, this.tex.hardGlow));
         break;
       case 'gravity': {
@@ -562,6 +534,15 @@ export class GameRenderer {
         break;
       }
     }
+    if (g.children.length === 0) {
+      const path = pr.modelPath.toLowerCase();
+      const color = path.includes('freezing') || path.includes('frost') ? 0x90d8ff
+        : path.includes('deathcoil') || path.includes('illidan') || path.includes('shadow') ? 0x7cff70
+          : path.includes('absorb') || path.includes('spirit') ? 0x80a0ff
+            : path.includes('dragon') || path.includes('fire') ? 0xff8020
+              : 0xd0b0ff;
+      g.add(this.sprite(color, 52 * (pr.scale || 1)), this.sprite(0xffffff, 16 * (pr.scale || 1), this.tex.hardGlow, 0.85));
+    }
     this.scene.add(g);
     return v;
   }
@@ -581,9 +562,10 @@ export class GameRenderer {
       v.obj.position.set(x, h, -y);
       const heading = Math.atan2(pr.vy, pr.vx);
       v.obj.rotation.y = heading;
+      if (v.mdx) v.obj.rotation.y = heading;
       const spin = v.obj.getObjectByName('spin');
       if (spin) spin.rotation.y += dt * 28;
-      if (pr.kind === 'gravity') v.obj.children[0].scale.setScalar(150 + Math.sin(this.time * 8) * 15);
+      if (pr.kind === 'gravity' && !v.mdx) v.obj.children[0].scale.setScalar(150 + Math.sin(this.time * 8) * 15);
 
       if (v.chain) {
         const owner = this.sim.players[pr.owner];
@@ -595,6 +577,7 @@ export class GameRenderer {
 
       v.carry += dt;
       const z = -y;
+      if (v.mdx) v.carry = 0;
       while (v.carry > 1 / 60) {
         v.carry -= 1 / 60;
         const jx = rand(-5, 5);
@@ -608,7 +591,7 @@ export class GameRenderer {
             this.fx.emit({ x: x + jx, y: h, z: z + jz, life: rand(0.3, 0.5), size: 30, endSize: 6, color: 0xa0ff50, endColor: 0x206000 });
             if (Math.random() < 0.3) this.smoke.emit({ x, y: h, z, vy: 20, life: 1, size: 18, endSize: 40, color: 0x404838, alpha: 0.4 });
             break;
-          case 'swap':
+          case 'displacement':
             this.fx.emit({ x: x + jx * 2, y: h + rand(-8, 8), z: z + jz * 2, life: 0.4, size: 16, endSize: 2, color: 0xa0ffff, endColor: 0x0060ff });
             break;
           case 'gravity': {
@@ -629,6 +612,13 @@ export class GameRenderer {
     }
     for (const [id, v] of this.projs) {
       if (!seen.has(id)) {
+        if (v.mdx) {
+          // DestroyEffect on the missile art plays its Death animation where it was.
+          const pos = v.mdx.getWorldPosition(new THREE.Vector3());
+          const m = v.mdx;
+          this.lib.release(m);
+          if (m.model.hasSequence('death')) this.lib.spawnEffect(m.model.path, pos, { scale: m.scale.x, facing: v.obj.rotation.y, sequence: 'death', ttl: 3 });
+        }
         this.scene.remove(v.obj);
         disposeObj(v.obj);
         if (v.chain) {
@@ -706,7 +696,7 @@ export class GameRenderer {
   }
 
   private scorch(x: number, y: number, size: number) {
-    if (Math.hypot(x, y) > this.sim.arenaRadius - size * 0.3) return;
+    if (!this.sim.isSafePoint(x, y)) return;
     const m = new THREE.Mesh(
       new THREE.PlaneGeometry(size, size),
       new THREE.MeshBasicMaterial({ map: this.tex.scorch, transparent: true, depthWrite: false, opacity: 0.85 }),
@@ -795,7 +785,7 @@ export class GameRenderer {
       }
       this.smoke.emit({ x: rock.position.x, y: rock.position.y, z: rock.position.z, life: 1.4, size: 50, endSize: 110, color: 0x1a1210, alpha: 0.6 });
     });
-    const r = SPELL_STATS.meteor.radius(1);
+    const r = 220;
     const ring = new THREE.Mesh(
       new THREE.PlaneGeometry(r * 2, r * 2),
       new THREE.MeshBasicMaterial({ map: this.tex.thickRing, color: 0xff5010, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }),
@@ -818,7 +808,50 @@ export class GameRenderer {
     this.shake = Math.max(this.shake, 22 * Math.max(0, 1 - d / 1500));
   }
 
+  /** Plays the event's real WC3 effect model if it's loaded; false means draw the procedural fallback. */
+  private modelFx(e: GameEvent): boolean {
+    const at = (path: string, x: number, y: number, h = 0, scale = 1) => this.lib.spawnEffect(path, sim2three(x, y, h), { scale }) !== null;
+    switch (e.t) {
+      case 'effect':
+        if (e.name === 'shield') return false;
+        if (e.name === 'thrustAfterimage' || e.name === 'timeshiftDummy') {
+          const inst = this.lib.spawnEffect(e.modelPath, sim2three(e.x, e.y, 0), { scale: e.scale, sequence: 'walk', fade: e.name === 'thrustAfterimage' ? 0.4 : 1.5 });
+          if (inst) inst.opacity = 0.5;
+          return inst !== null;
+        }
+        return at(e.modelPath, e.x, e.y, 0, e.scale);
+      case 'explode':
+        return at(e.modelPath, e.x, e.y, 0, e.scale);
+      case 'teleport':
+        return at(e.modelPath, e.fx, e.fy) && at(e.modelPath, e.tx, e.ty);
+      case 'swap':
+        return at(e.modelPath, e.ax, e.ay) && at(e.modelPath, e.bx, e.by);
+      case 'meteorImpact':
+      case 'thrustHit':
+      case 'death':
+        return at(e.modelPath, e.x, e.y);
+      case 'reflect':
+        return at(e.modelPath, e.x, e.y, PROJ_HEIGHT);
+      default:
+        return false;
+    }
+  }
+
   onEvent(e: GameEvent) {
+    if (e.t === 'cast') {
+      const v = this.units.get(e.pid);
+      if (v) {
+        v.spellT = 0.6;
+        v.seq = '';
+      }
+    }
+    if (this.modelFx(e)) {
+      if (e.t === 'meteorImpact') {
+        const d = Math.hypot(e.x - this.camX, e.y - this.camY);
+        this.shake = Math.max(this.shake, 22 * Math.max(0, 1 - d / 1500));
+      }
+      return;
+    }
     switch (e.t) {
       case 'cast': {
         const p = this.sim.players[e.pid];
@@ -831,7 +864,7 @@ export class GameRenderer {
         } else if (p.windwalk <= 0 || p.id === this.localId) {
           const hx = p.x + Math.cos(p.facing) * 30;
           const hy = p.y + Math.sin(p.facing) * 30;
-          const col = e.spell === 'homing' ? 0x80ff40 : e.spell === 'gravity' || e.spell === 'link' ? 0xa060ff : e.spell === 'swap' || e.spell === 'teleport' || e.spell === 'lightning' ? 0x60a0ff : 0xff8020;
+          const col = e.spell === 'homing' ? 0x80ff40 : e.spell === 'gravity' || e.spell === 'link' ? 0xa060ff : e.spell === 'displacement' || e.spell === 'teleport' || e.spell === 'lightning' ? 0x60a0ff : 0xff8020;
           this.flash(hx, hy, 70, col, 60, 0.2);
         }
         break;
@@ -839,9 +872,9 @@ export class GameRenderer {
       case 'explode': {
         const colors: Record<string, [number, number]> = {
           fireball: [0xffc040, 0xc02000], homing: [0xc0ff60, 0x208000], boomerang: [0xe0e0ff, 0x4040a0],
-          gravity: [0xd090ff, 0x4000a0], link: [0xc0a0ff, 0x4000a0], swap: [0xa0ffff, 0x0060ff], clash: [0xffffff, 0xff6000],
+          gravity: [0xd090ff, 0x4000a0], link: [0xc0a0ff, 0x4000a0], displacement: [0xa0ffff, 0x0060ff], clash: [0xffffff, 0xff6000],
         };
-        const [c0, c1] = colors[e.kind];
+        const [c0, c1] = colors[e.kind] ?? [0xffc040, 0x8040ff];
         const big = e.kind === 'fireball' || e.kind === 'homing' || e.kind === 'clash';
         this.burst(e.x, e.y, PROJ_HEIGHT, big ? 34 : 16, { speed: big ? 330 : 200, color: c0, endColor: c1, size: big ? 40 : 20, endSize: 6, life: 0.5, drag: 3 });
         if (big) {
@@ -908,21 +941,51 @@ export class GameRenderer {
     }
   }
 
+  // ---------- obstacles ----------
+
+  private obstacleObject(o: Obstacle): { obj: THREE.Object3D; mdx: boolean } {
+    const inst = this.lib.instance(o.modelPath);
+    if (inst) {
+      inst.setSequence('stand', true);
+      inst.scale.setScalar(o.scale);
+      inst.rotation.y = o.facing;
+      inst.position.set(o.x, 0, -o.y);
+      return { obj: inst, mdx: true };
+    }
+    return { obj: proceduralObstacle(o), mdx: false };
+  }
+
+  private updateObstacles() {
+    if (this.obstacleSet !== this.sim.obstacles) {
+      for (const v of this.obstacleViews) this.removeObstacleView(v);
+      this.obstacleSet = this.sim.obstacles;
+      this.obstacleViews = this.sim.obstacles.map((obs) => {
+        const v = { obs, ...this.obstacleObject(obs) };
+        this.scene.add(v.obj);
+        return v;
+      });
+    }
+    for (const v of this.obstacleViews) {
+      if (v.mdx || !this.lib.get(v.obs.modelPath)) continue;
+      this.removeObstacleView(v);
+      Object.assign(v, this.obstacleObject(v.obs));
+      this.scene.add(v.obj);
+    }
+  }
+
+  private removeObstacleView(v: { obj: THREE.Object3D; mdx: boolean }) {
+    if (v.mdx) this.lib.release(v.obj as MdxInstance);
+    else {
+      this.scene.remove(v.obj);
+      disposeObj(v.obj);
+    }
+  }
+
   // ---------- frame ----------
 
   render(alpha: number, dt: number) {
     this.time += dt;
-    this.groundMat.uniforms.uTime.value = this.time;
-    this.groundMat.uniforms.uRadius.value = this.sim.arenaRadius;
-    this.lavaMat.uniforms.uTime.value = this.time;
-    this.lavaMat.uniforms.uRadius.value = this.sim.arenaRadius;
-
-    // Ambient lava bubbles around the shore
-    for (let i = 0; i < 2; i++) {
-      const a = rand(0, Math.PI * 2);
-      const r = this.sim.arenaRadius + rand(10, 600);
-      this.fx.emit({ x: Math.cos(a) * r, y: -4, z: Math.sin(a) * r, vy: rand(30, 90), life: rand(0.5, 1.2), size: rand(10, 24), endSize: 2, color: 0xffa030, endColor: 0xff2000, gravity: 40 });
-    }
+    this.terrain.update(this.sim);
 
     this.updateUnits(alpha, dt);
     this.updateProjectiles(alpha, dt);
@@ -938,6 +1001,7 @@ export class GameRenderer {
     this.transients = this.transients.filter((t) => t.life > 0);
     this.fx.update(dt);
     this.smoke.update(dt);
+    this.updateObstacles();
 
     // Camera
     this.shake = Math.max(0, this.shake - dt * 40);
@@ -946,6 +1010,8 @@ export class GameRenderer {
     const target = sim2three(this.camX + sx, this.camY + sy, 0);
     this.camera.position.set(target.x, Math.sin(CAM_PITCH) * this.camDist, target.z + Math.cos(CAM_PITCH) * this.camDist);
     this.camera.lookAt(target);
+    this.camera.updateMatrixWorld();
+    this.lib.update(dt, this.camera);
 
     this.renderer.render(this.scene, this.camera);
     this.renderPortrait();
@@ -965,6 +1031,38 @@ export class GameRenderer {
       this.portraitCam.updateProjectionMatrix();
     }
     const p = this.sim.players[this.localId];
+    const v = this.units.get(p.id)!;
+    if (!this.portraitMdx) {
+      const model = this.lib.get(WARLOCK_MODEL);
+      if (model) {
+        // No BloodelfWizard_portrait in the map, so like WC3 we frame the unit model's head.
+        this.portraitMdx = model.createInstance();
+        this.portraitMdx.rotation.y = 0.5;
+        this.portraitScene.add(this.portraitMdx);
+        if (this.portraitModel) this.portraitModel.root.visible = false;
+        this.portraitColor = -1;
+      }
+    }
+    if (this.portraitMdx) {
+      const pm = this.portraitMdx;
+      if (this.portraitColor !== p.color) {
+        pm.teamColor = new THREE.Color(PLAYER_COLORS[p.color].css);
+        this.portraitColor = p.color;
+        // BloodelfWizard's head sits at ~118 model units and it faces +X.
+        this.portraitCam.position.set(95, 124, 0);
+        this.portraitCam.fov = 30;
+        this.portraitCam.updateProjectionMatrix();
+        this.portraitCam.lookAt(0, 112, 0);
+      }
+      const want = !p.alive ? 'death' : v.seq === 'spell' ? 'spell' : 'stand';
+      if (want !== this.portraitSeq) {
+        pm.setSequence(want, want === 'stand');
+        this.portraitSeq = want;
+      }
+      pm.update(1 / 60, this.portraitCam);
+      pr.render(this.portraitScene, this.portraitCam);
+      return;
+    }
     if (this.portraitColor !== p.color) {
       if (this.portraitModel) this.portraitScene.remove(this.portraitModel.root);
       this.portraitModel = new WarlockModel(new THREE.Color(PLAYER_COLORS[p.color].css), this.tex.glow);
@@ -973,7 +1071,6 @@ export class GameRenderer {
       this.portraitColor = p.color;
     }
     const m = this.portraitModel!;
-    const v = this.units.get(p.id)!;
     m.update({ moving: 0, casting: v.casting * 0.5, knocked: 0, time: this.time });
     m.setTint(new THREE.Color(0.15, 0.15, 0.15), p.alive ? 0 : 0.7);
     pr.render(this.portraitScene, this.portraitCam);

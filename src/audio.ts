@@ -1,4 +1,7 @@
-// Procedurally synthesised sound effects (no audio assets needed).
+// Sound effects: original sound files from the user's map/MPQs when available, otherwise
+// procedurally synthesised stand-ins.
+import { assets } from './assets/store';
+
 export type Sfx =
   | 'fireball' | 'explode' | 'lightning' | 'teleport' | 'swap' | 'meteorFall' | 'meteorImpact' | 'hit'
   | 'death' | 'shield' | 'windwalk' | 'thrust' | 'boomerang' | 'homing' | 'gravity' | 'link' | 'error'
@@ -64,11 +67,42 @@ export class SoundSystem {
   }
 
   playAt(name: Sfx, x: number, y: number, vol = 1) {
+    const [att, pan] = this.spatial(x, y);
+    this.play(name, vol * att, pan);
+  }
+
+  private spatial(x: number, y: number): [number, number] {
     const dx = x - this.listenerX;
-    const dy = y - this.listenerY;
-    const d = Math.hypot(dx, dy);
-    const att = Math.max(0.12, 1 - d / 2200);
-    this.play(name, vol * att, Math.max(-0.8, Math.min(0.8, dx / 1200)));
+    const d = Math.hypot(dx, y - this.listenerY);
+    return [Math.max(0.12, 1 - d / 2200), Math.max(-0.8, Math.min(0.8, dx / 1200))];
+  }
+
+  /**
+   * Plays an original sound file (e.g. `war3mapImported\\CFirstBlood.mp3`). If it isn't available
+   * the procedural `fallback` plays instead. Positional when `at` is given.
+   */
+  playFile(path: string, fallback: Sfx | null, vol = 1, at?: { x: number; y: number }) {
+    if (!this.ctx) return;
+    const [att, pan] = at ? this.spatial(at.x, at.y) : [1, 0];
+    if (!assets.has(path)) {
+      if (fallback) this.play(fallback, vol * att, pan);
+      return;
+    }
+    const ctx = this.ctx;
+    void assets.sound(path, ctx).then((buf) => {
+      if (!buf) {
+        if (fallback) this.play(fallback, vol * att, pan);
+        return;
+      }
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      const g = ctx.createGain();
+      g.gain.value = vol * att;
+      const p = ctx.createStereoPanner();
+      p.pan.value = pan;
+      src.connect(g).connect(p).connect(this.master);
+      src.start();
+    });
   }
 
   play(name: Sfx, vol = 1, pan = 0) {

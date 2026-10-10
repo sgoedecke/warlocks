@@ -559,8 +559,21 @@ body {
 .shop-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 12px 10px;
+  grid-template-rows: repeat(3, 104px);
+  gap: 10px 10px;
   justify-items: center;
+}
+
+.shop-item.off-page {
+  display: none;
+}
+
+.shop-item.locked .icon {
+  filter: grayscale(1) brightness(0.35);
+}
+
+.shop-item.locked .price {
+  color: #888;
 }
 
 .shop-item {
@@ -764,4 +777,81 @@ body {
 
 .color-swatches div.sel {
   box-shadow: 0 0 0 2px #ffe070;
+}
+
+.menu-cols {
+  display: flex;
+  gap: 18px;
+  align-items: stretch;
+}
+
+#menu .assets-panel {
+  width: 330px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 14px;
+}
+
+#menu.dropping .assets-panel {
+  outline: 2px dashed var(--gold);
+  outline-offset: 4px;
+}
+
+.assets-title {
+  color: var(--gold);
+  font-size: 18px;
+  text-align: center;
+}
+
+.asset-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: #999;
+}
+
+.asset-row span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+
+.asset-row.ok span:first-child {
+  color: #4f4;
+}
+
+.asset-row.ok span:last-child {
+  color: #fff;
+}
+
+.asset-row a {
+  color: #c66;
+  text-decoration: none;
+  margin-left: 4px;
+}
+
+.asset-warn {
+  color: #f84;
+}
+
+.asset-busy {
+  color: var(--gold);
+}
+
+.assets-panel .wc-btn {
+  align-self: center;
+  cursor: pointer;
+}
+
+.assets-note {
+  color: #aaa;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.assets-note b {
+  color: var(--gold);
+  font-weight: normal;
 }

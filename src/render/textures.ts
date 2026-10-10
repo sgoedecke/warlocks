@@ -1,4 +1,5 @@
-import type { SpellId } from '../config';
+import { ALL_SPELLS, ITEMS, SPELLS, type SpellId } from '../config';
+import { assets } from '../assets/store';
 
 // ---------- noise helpers ----------
 function hash(x: number, y: number, seed: number): number {
@@ -43,113 +44,6 @@ function makeCanvas(w: number, h: number): [HTMLCanvasElement, CanvasRenderingCo
 }
 
 // ---------- terrain ----------
-
-// Rough brown dirt, similar to WC3's Lordaeron/Barrens "Rough Dirt" tile.
-export function makeDirtTexture(size = 512): HTMLCanvasElement {
-  const [c, g] = makeCanvas(size, size);
-  const img = g.createImageData(size, size);
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const u = x / size;
-      const v = y / size;
-      const n = fbm(u, v, 3, 8, 5);
-      const n2 = fbm(u, v, 11, 32, 3);
-      const peb = hash(x, y, 7) > 0.985 ? 0.25 : 0;
-      const l = 0.55 + 0.6 * (n - 0.5) + 0.35 * (n2 - 0.5) + peb;
-      const i = (y * size + x) * 4;
-      img.data[i] = Math.min(255, 118 * l + 12);
-      img.data[i + 1] = Math.min(255, 92 * l + 6);
-      img.data[i + 2] = Math.min(255, 62 * l);
-      img.data[i + 3] = 255;
-    }
-  }
-  g.putImageData(img, 0, 0);
-  return c;
-}
-
-// Irregular flagstones like WC3's Dalaran Ruins / Dungeon "Stone" tiles.
-export function makeStoneTexture(size = 512): HTMLCanvasElement {
-  const [c, g] = makeCanvas(size, size);
-  const img = g.createImageData(size, size);
-  const cells = 5;
-  // Jittered grid -> voronoi-ish slabs
-  const pts: [number, number, number][] = [];
-  for (let j = 0; j < cells; j++)
-    for (let i = 0; i < cells; i++)
-      pts.push([(i + 0.2 + 0.6 * hash(i, j, 21)) / cells, (j + 0.2 + 0.6 * hash(i, j, 22)) / cells, hash(i, j, 23)]);
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const u = x / size;
-      const v = y / size;
-      let d1 = 9;
-      let d2 = 9;
-      let tone = 0;
-      const ci = Math.floor(u * cells);
-      const cj = Math.floor(v * cells);
-      for (let oj = -1; oj <= 1; oj++)
-        for (let oi = -1; oi <= 1; oi++) {
-          const ii = ci + oi;
-          const jj = cj + oj;
-          const wi = (ii + cells) % cells;
-          const wj = (jj + cells) % cells;
-          const [px, py, t] = pts[wj * cells + wi];
-          const dx = u - (px + (ii - wi) / cells);
-          const dy = v - (py + (jj - wj) / cells);
-          const d = Math.sqrt(dx * dx + dy * dy);
-          if (d < d1) {
-            d2 = d1;
-            d1 = d;
-            tone = t;
-          } else if (d < d2) d2 = d;
-        }
-      const edge = d2 - d1;
-      const n = fbm(u, v, 5, 16, 4);
-      const grout = edge < 0.012 ? 0.35 : edge < 0.022 ? 0.75 : 1;
-      const bevel = edge < 0.035 ? 0.92 + (edge - 0.022) * 3 : 1;
-      const l = (0.5 + 0.25 * tone + 0.4 * (n - 0.5)) * grout * bevel;
-      const i = (y * size + x) * 4;
-      img.data[i] = Math.min(255, 128 * l + 10);
-      img.data[i + 1] = Math.min(255, 118 * l + 8);
-      img.data[i + 2] = Math.min(255, 104 * l + 8);
-      img.data[i + 3] = 255;
-    }
-  }
-  g.putImageData(img, 0, 0);
-  // Cracks
-  g.strokeStyle = 'rgba(20,14,10,0.55)';
-  g.lineWidth = 1.2;
-  for (let k = 0; k < 14; k++) {
-    let x = hash(k, 1, 41) * size;
-    let y = hash(k, 2, 41) * size;
-    g.beginPath();
-    g.moveTo(x, y);
-    for (let s = 0; s < 6; s++) {
-      x += (hash(k, s, 43) - 0.5) * 40;
-      y += (hash(k, s, 44) - 0.5) * 40;
-      g.lineTo(x, y);
-    }
-    g.stroke();
-  }
-  return c;
-}
-
-export function makeRockTexture(size = 256): HTMLCanvasElement {
-  const [c, g] = makeCanvas(size, size);
-  const img = g.createImageData(size, size);
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const n = fbm(x / size, y / size, 77, 6, 5);
-      const l = 0.35 + 0.8 * (n - 0.5);
-      const i = (y * size + x) * 4;
-      img.data[i] = 70 * l + 18;
-      img.data[i + 1] = 55 * l + 12;
-      img.data[i + 2] = 48 * l + 10;
-      img.data[i + 3] = 255;
-    }
-  }
-  g.putImageData(img, 0, 0);
-  return c;
-}
 
 export function makeGlowTexture(size = 64, hardness = 0): HTMLCanvasElement {
   const [c, g] = makeCanvas(size, size);
@@ -228,7 +122,7 @@ function glowBall(g: CanvasRenderingContext2D, x: number, y: number, r: number, 
   g.fill();
 }
 
-const ICONS: Record<SpellId, IconPainter> = {
+const ICONS: Partial<Record<SpellId, IconPainter>> = {
   fireball: (g, s) => {
     bg(g, s, '#5a1200', '#120200');
     g.save();
@@ -332,7 +226,7 @@ const ICONS: Record<SpellId, IconPainter> = {
       g.stroke();
     }
   },
-  swap: (g, s) => {
+  displacement: (g, s) => {
     bg(g, s, '#0a5a5a', '#010c0c');
     g.strokeStyle = '#aaffff';
     g.fillStyle = '#aaffff';
@@ -453,12 +347,85 @@ function bevel(g: CanvasRenderingContext2D, s: number) {
 
 const iconCache = new Map<string, string>();
 
+const realIcons = new Map<string, HTMLCanvasElement>();
+const iconKey = (path: string) => path.toLowerCase().replace(/\//g, '\\');
+
+/** Loads the original BTN icons that are present in the user's archives. */
+export async function loadRealIcons(extraPaths: string[] = []): Promise<void> {
+  realIcons.clear();
+  iconCache.clear();
+  const paths = new Set([...ALL_SPELLS.map((id) => SPELLS[id].icon), ...Object.values(ITEMS).map((i) => i.icon), ...extraPaths]);
+  await Promise.all([...paths].map(async (path) => {
+    if (!assets.has(path)) return;
+    const tex = await assets.texture(path);
+    const img = tex?.image as { data: Uint8ClampedArray | Uint8Array; width: number; height: number } | undefined;
+    if (!img?.data) return;
+    const c = document.createElement('canvas');
+    c.width = img.width;
+    c.height = img.height;
+    c.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(img.data), img.width, img.height), 0, 0);
+    realIcons.set(iconKey(path), c);
+  }));
+  iconCache.clear();
+}
+
+function realIconUrl(path: string, size: number): string | null {
+  const real = realIcons.get(iconKey(path));
+  if (!real) return null;
+  const key = `${iconKey(path)}:${size}`;
+  let url = iconCache.get(key);
+  if (!url) {
+    const [c, g] = makeCanvas(size, size);
+    g.drawImage(real, 0, 0, size, size);
+    url = c.toDataURL();
+    iconCache.set(key, url);
+  }
+  return url;
+}
+
+/** A command button icon by its WC3 path: the original if loaded, else a generic stand-in. */
+export function btnIcon(path: string, size = 64): string {
+  const real = realIconUrl(path, size);
+  if (real) return real;
+  const key = `btn:${iconKey(path)}:${size}`;
+  let url = iconCache.get(key);
+  if (!url) {
+    const name = (path.split('\\').pop() ?? '').replace(/^(PAS)?BTN|\.blp$/gi, '');
+    let h = 0;
+    for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    const hue = h % 360;
+    const [c, g] = makeCanvas(size, size);
+    bg(g, size, `hsl(${hue},45%,28%)`, `hsl(${hue},50%,6%)`);
+    glowBall(g, size / 2, size / 2, size * 0.3, [[0, '#fff'], [0.4, `hsl(${hue},80%,65%)`], [1, 'rgba(0,0,0,0)']]);
+    g.fillStyle = '#fff6d0';
+    g.font = `bold ${Math.floor(size * 0.24)}px serif`;
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText(name.replace(/[^A-Z]/g, '').slice(0, 2) || name.slice(0, 2), size / 2, size / 2);
+    bevel(g, size);
+    url = c.toDataURL();
+    iconCache.set(key, url);
+  }
+  return url;
+}
+
 export function spellIcon(id: SpellId, size = 64): string {
+  const real = realIconUrl(SPELLS[id].icon, size);
+  if (real) return real;
   const key = `${id}:${size}`;
   let url = iconCache.get(key);
   if (!url) {
     const [c, g] = makeCanvas(size, size);
-    ICONS[id](g, size);
+    const paint = ICONS[id] ?? ((gg: CanvasRenderingContext2D, s: number) => {
+      bg(gg, s, '#2a1f45', '#05030a');
+      glowBall(gg, s / 2, s / 2, s * 0.34, [[0, '#fff'], [0.35, '#ffd060'], [0.75, '#8040ff'], [1, 'rgba(0,0,0,0)']]);
+      gg.fillStyle = '#fff6b0';
+      gg.font = `bold ${Math.floor(s * 0.22)}px serif`;
+      gg.textAlign = 'center';
+      gg.textBaseline = 'middle';
+      gg.fillText(id.slice(0, 2).toUpperCase(), s / 2, s / 2);
+    });
+    paint(g, size);
     bevel(g, size);
     url = c.toDataURL();
     iconCache.set(key, url);

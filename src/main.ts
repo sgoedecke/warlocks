@@ -1,14 +1,16 @@
 import './style.css';
 import {
-  BOT_NAMES, DT, PLAYER_COLORS, SPELLS, SPELL_ORDER, SPELL_STATS, WARLOCK_RADIUS, type SpellId,
+  ALL_SPELLS, BOT_NAMES, DT, PLAYER_COLORS, SPELLS, WARLOCK_CARD, WARLOCK_RADIUS, type SpellId,
 } from './config';
 import { Bot, type Difficulty } from './ai/bot';
 import { Sim } from './sim/game';
 import type { Command, GameEvent, PlayerSetup } from './sim/types';
 import { GameRenderer } from './render/renderer';
-import { makeCursor } from './render/textures';
-import { Hud } from './ui/hud';
+import { loadRealIcons, makeCursor } from './render/textures';
+import { Hud, SHOP_ICON_PATHS } from './ui/hud';
 import { SoundSystem, type Sfx } from './audio';
+import { addFiles, assetStatus, initAssets, onAssetStatus, removeArchive, type ArchiveRole, type AssetStatus } from './assets/loader';
+import { clearMdxCache } from './render/mdx';
 
 interface Settings {
   name: string;
@@ -16,13 +18,18 @@ interface Settings {
   bots: number;
   difficulty: Difficulty;
   rounds: number;
+  mode: 'round' | 'deathmatch';
+  pointLimit: number;
+  teams: 'ffa' | '2teams';
+  arenaShape: 'square' | 'circle';
+  startingGold: number;
   quickCast: boolean;
   lockCamera: boolean;
   volume: number;
 }
 
 const DEFAULTS: Settings = {
-  name: 'Player', color: 0, bots: 5, difficulty: 'normal', rounds: 10, quickCast: false, lockCamera: false, volume: 0.6,
+  name: 'Player', color: 0, bots: 5, difficulty: 'normal', rounds: 10, mode: 'round', pointLimit: 20, teams: 'ffa', arenaShape: 'square', startingGold: 10, quickCast: false, lockCamera: false, volume: 0.6,
 };
 
 function loadSettings(): Settings {
@@ -44,7 +51,7 @@ document.body.style.cursor = CURSORS.normal;
 
 const CAST_SFX: Partial<Record<SpellId, Sfx>> = {
   fireball: 'fireball', homing: 'homing', boomerang: 'boomerang', gravity: 'gravity', link: 'link',
-  swap: 'swap', thrust: 'thrust', shield: 'shield', windwalk: 'windwalk',
+  displacement: 'swap', thrust: 'thrust', shield: 'shield', windwalk: 'windwalk',
 };
 
 class Game {
@@ -71,7 +78,7 @@ class Game {
     const colors = PLAYER_COLORS.map((_, i) => i).filter((c) => c !== settings.color);
     for (let i = 0; i < settings.bots; i++) players.push({ name: names[i], color: colors[i], isBot: true });
     const seed = (Math.random() * 2 ** 31) | 0;
-    this.sim = new Sim({ players, seed, rounds: settings.rounds });
+    this.sim = new Sim({ players, seed, rules: { mode: settings.mode, rounds: settings.rounds, pointLimit: settings.pointLimit, teams: settings.teams, arenaShape: settings.arenaShape, startingGold: settings.startingGold } });
     this.bots = this.sim.players.filter((p) => p.isBot).map((p) => new Bot(p.id, seed ^ (p.id * 7919), settings.difficulty));
     this.lockCamera = settings.lockCamera;
 
@@ -87,7 +94,11 @@ class Game {
       onSpell: (id) => this.activateSpell(id),
       onBuy: (id) => {
         sound.play('click');
-        this.pending.push({ pid: this.localId, type: 'buy', spell: id });
+        this.pending.push({ pid: this.localId, type: 'buy', product: id });
+      },
+      onToggle: (spell) => {
+        sound.play('click');
+        this.pending.push({ pid: this.localId, type: 'toggle', spell });
       },
       onReady: () => {
         sound.play('click');
@@ -243,7 +254,8 @@ class Game {
         if (this.canAct()) this.pending.push({ pid: this.localId, type: 'stop' });
         return;
       }
-      const spell = SPELL_ORDER.find((id) => SPELLS[id].hotkey === k);
+      const spell = WARLOCK_CARD.find((id) => SPELLS[id].hotkey === k && (this.me.spells[id] ?? 0) > 0)
+        ?? ALL_SPELLS.find((id) => SPELLS[id].hotkey === k && (this.me.spells[id] ?? 0) > 0);
       if (spell) this.activateSpell(spell);
     });
   }
@@ -286,8 +298,7 @@ class Game {
             cursor = CURSORS.targetEnemy;
           }
         }
-        const lvl = this.me.spells[this.targeting] ?? 1;
-        if (this.targeting === 'meteor') aoe = { x: w.x, y: w.y, r: SPELL_STATS.meteor.radius(lvl) };
+        if (this.targeting === 'meteor') aoe = { x: w.x, y: w.y, r: 220 };
       }
     }
     if (document.body.style.cursor !== cursor) document.body.style.cursor = cursor;
@@ -326,8 +337,16 @@ class Game {
       case 'death':
         sound.playAt('death', e.x, e.y);
         break;
+      case 'announcement':
+        if (e.soundPath) sound.playFile(e.soundPath, 'horn', 0.9);
+        else sound.play('horn', 0.9);
+        break;
+      case 'effect':
+        if (e.soundPath) sound.playFile(e.soundPath, 'reflect', 1, e);
+        break;
       case 'reflect':
-        sound.playAt('reflect', e.x, e.y);
+        if (e.soundPath) sound.playFile(e.soundPath, 'reflect', 1, e);
+        else sound.playAt('reflect', e.x, e.y);
         break;
       case 'bounty':
         if (e.pid === this.localId) sound.play('bounty', 0.8);
@@ -382,6 +401,61 @@ class Game {
 
 // ---------- main menu ----------
 
+const ROLE_LABEL: Record<ArchiveRole, string> = { map: 'Map', base: 'war3.mpq', expansion: 'War3x.mpq', patch: 'War3Patch.mpq' };
+
+function bindAssetPanel(menu: HTMLElement) {
+  const statusEl = menu.querySelector<HTMLElement>('[data-asset-status]')!;
+  const input = menu.querySelector<HTMLInputElement>('[data-asset-input]')!;
+  let busy = false;
+  const render = (st: AssetStatus) => {
+    const byRole = new Map(st.archives.map((a) => [a.role, a.name]));
+    const row = (role: ArchiveRole) => {
+      const name = byRole.get(role);
+      return `<div class="asset-row ${name ? 'ok' : ''}"><span>${ROLE_LABEL[role]}</span><span>${name ? `${escapeHtml(name)} <a href="#" data-remove="${role}" title="Forget">✕</a>` : '<i>not loaded</i>'}</span></div>`;
+    };
+    statusEl.innerHTML = (['map', 'base', 'expansion', 'patch'] as ArchiveRole[]).map(row).join('')
+      + (st.hasMap && !st.hasWarlockModel ? '<div class="asset-warn">That map has no BloodelfWizard model; is it Warlocks?</div>' : '')
+      + (st.error ? `<div class="asset-warn">${escapeHtml(st.error)}</div>` : '')
+      + (busy ? '<div class="asset-busy">Reading…</div>' : '');
+    statusEl.querySelectorAll<HTMLElement>('[data-remove]').forEach((a) => a.addEventListener('click', (e) => {
+      e.preventDefault();
+      void removeArchive(a.dataset.remove as ArchiveRole);
+    }));
+  };
+  const off = onAssetStatus(render);
+  const add = async (files: Iterable<File>) => {
+    busy = true;
+    render(assetStatus());
+    try {
+      await addFiles(files);
+    } finally {
+      busy = false;
+      render(assetStatus());
+    }
+  };
+  input.addEventListener('change', () => input.files && void add([...input.files]));
+  menu.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    menu.classList.add('dropping');
+  });
+  menu.addEventListener('dragleave', () => menu.classList.remove('dropping'));
+  menu.addEventListener('drop', (e) => {
+    e.preventDefault();
+    menu.classList.remove('dropping');
+    if (e.dataTransfer?.files.length) void add([...e.dataTransfer.files]);
+  });
+  new MutationObserver((_, obs) => {
+    if (!menu.isConnected) {
+      off();
+      obs.disconnect();
+    }
+  }).observe(app, { childList: true });
+}
+
+function escapeHtml(t: string) {
+  return t.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
+}
+
 function showMenu() {
   const s = loadSettings();
   const menu = document.createElement('div');
@@ -391,23 +465,42 @@ function showMenu() {
   menu.innerHTML = `
     <div class="title">WARLOCKS</div>
     <div class="subtitle">A tribute to the Warcraft III custom map</div>
+    <div class="menu-cols">
     <div class="panel frame">
       <div class="form-row">Name <input data-k="name" maxlength="16" value=""></div>
       <div class="form-row">Colour <div class="color-swatches">${PLAYER_COLORS.map((c, i) => `<div data-c="${i}" title="${c.name}" style="background:${c.css}" class="${i === s.color ? 'sel' : ''}"></div>`).join('')}</div></div>
       <div class="form-row">Opponents <select data-k="bots">${opt([1, 2, 3, 4, 5, 6, 7], s.bots)}</select></div>
       <div class="form-row">Difficulty <select data-k="difficulty">${opt(['easy', 'normal', 'hard'], s.difficulty, ['Easy', 'Normal', 'Insane'])}</select></div>
+      <div class="form-row">Mode <select data-k="mode">${opt(['round', 'deathmatch'], s.mode, ['Round', 'Deathmatch'])}</select></div>
       <div class="form-row">Rounds <select data-k="rounds">${opt([3, 5, 10, 15, 20], s.rounds)}</select></div>
+      <div class="form-row">Point limit <select data-k="pointLimit">${opt([10, 15, 20, 30, 50], s.pointLimit)}</select></div>
+      <div class="form-row">Teams <select data-k="teams">${opt(['ffa', '2teams'], s.teams, ['FFA', '2 Teams'])}</select></div>
+      <div class="form-row">Arena <select data-k="arenaShape">${opt(['square', 'circle'], s.arenaShape, ['Square', 'Circle'])}</select></div>
+      <div class="form-row">Starting gold <select data-k="startingGold">${opt([10, 20, 50, 100], s.startingGold)}</select></div>
       <div class="form-row">Quick cast <input type="checkbox" data-k="quickCast" ${s.quickCast ? 'checked' : ''}></div>
       <div class="form-row">Lock camera to hero <input type="checkbox" data-k="lockCamera" ${s.lockCamera ? 'checked' : ''}></div>
       <div class="form-row" style="justify-content:center;margin-top:18px"><button class="wc-btn big" data-start>Start Game</button></div>
     </div>
+    <div class="panel frame assets-panel">
+      <div class="assets-title">Original assets</div>
+      <div data-asset-status></div>
+      <label class="wc-btn">Add files…<input type="file" multiple accept=".w3m,.w3x,.mpq" data-asset-input hidden></label>
+      <div class="assets-note">
+        Drop <b>Warlock 0.88b</b> (.w3m) here to use its warlock model, spell effects and announcer voice.
+        For the Blizzard art the map borrows (missiles, doodads, terrain tiles, icons), also add
+        <b>war3.mpq</b>, <b>War3x.mpq</b> and <b>War3Patch.mpq</b> from a classic (1.26 or earlier) install.
+        Anything missing is drawn procedurally. Files never leave your browser.
+      </div>
+    </div>
+    </div>
     <div class="help">
       <b>Right-click</b> move &nbsp;·&nbsp; <b>Hotkey + Left-click</b> cast &nbsp;·&nbsp; <b>S</b> stop &nbsp;·&nbsp; <b>Esc / Right-click</b> cancel targeting<br>
       <b>Arrows / screen edge</b> scroll &nbsp;·&nbsp; <b>Space</b> centre on hero &nbsp;·&nbsp; <b>C</b> camera lock &nbsp;·&nbsp; <b>Wheel</b> zoom &nbsp;·&nbsp; <b>Tab</b> scores &nbsp;·&nbsp; <b>F10</b> menu<br>
-      Spells: ${SPELL_ORDER.map((id) => `${SPELLS[id].name} <b>${SPELLS[id].hotkey}</b>`).join(' · ')}
+      Spells: ${WARLOCK_CARD.map((id) => `${SPELLS[id].name} <b>${SPELLS[id].hotkey}</b>`).join(' · ')}
     </div>`;
   app.appendChild(menu);
   (menu.querySelector('[data-k="name"]') as HTMLInputElement).value = s.name;
+  bindAssetPanel(menu);
   menu.querySelectorAll<HTMLElement>('.color-swatches div').forEach((d) =>
     d.addEventListener('click', () => {
       menu.querySelectorAll('.color-swatches div').forEach((x) => x.classList.remove('sel'));
@@ -419,7 +512,12 @@ function showMenu() {
     s.name = get('name').value.trim() || 'Player';
     s.bots = Number(get('bots').value);
     s.difficulty = get('difficulty').value as Difficulty;
+    s.mode = get('mode').value as Settings['mode'];
     s.rounds = Number(get('rounds').value);
+    s.pointLimit = Number(get('pointLimit').value);
+    s.teams = get('teams').value as Settings['teams'];
+    s.arenaShape = get('arenaShape').value as Settings['arenaShape'];
+    s.startingGold = Number(get('startingGold').value);
     s.quickCast = get('quickCast').checked;
     s.lockCamera = get('lockCamera').checked;
     saveSettings(s);
@@ -441,6 +539,37 @@ function startGame(s: Settings) {
     else showMenu();
   });
   if (import.meta.env.DEV) (window as unknown as { __game: Game }).__game = game;
+  return game;
 }
 
-showMenu();
+let iconsLoading: Promise<void> = Promise.resolve();
+onAssetStatus(() => {
+  clearMdxCache();
+  iconsLoading = loadRealIcons(SHOP_ICON_PATHS);
+});
+
+async function boot() {
+  await initAssets();
+  await iconsLoading;
+  if (import.meta.env.DEV && new URLSearchParams(location.search).has('autostart')) {
+    const p = new URLSearchParams(location.search);
+    const s = { ...loadSettings(), bots: Number(p.get('bots') ?? 5), difficulty: 'hard' as Difficulty, rounds: 1, mode: 'round' as const, startingGold: 120, lockCamera: true, volume: 0, arenaShape: (p.get('arena') ?? 'square') as Settings['arenaShape'] };
+    const game = startGame(s);
+    const internals = game as unknown as { pending: Command[]; sim: Sim };
+    if (p.get('phase') === 'fight' || p.get('phase') === 'shrink') {
+      setTimeout(() => {
+        internals.pending.push({ pid: 0, type: 'ready' });
+        internals.sim.phaseTimer = 0;
+      }, 500);
+    }
+    if (p.get('phase') === 'shrink') {
+      setInterval(() => {
+        internals.sim.shrinkTimer = 0;
+      }, 500);
+    }
+  } else {
+    showMenu();
+  }
+}
+
+void boot();
