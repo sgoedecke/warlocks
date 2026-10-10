@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { assets, type MdlxModel as ParsedMdlxModel } from '../../assets/store';
-import { getFallbackTexture, makeTeamColorTexture } from './fallbackTextures';
+import { canvasTexture, getFallbackTexture, makeTeamColorTexture } from './fallbackTextures';
+import { bakeSkin, hasSkinRecipe } from '../opentex/bake';
+import { hasOpenTexture } from '../opentex/particles';
 
 type TrackValue = Float32Array | Uint32Array;
 type AnimationTrack = { name: string; interpolationType: number; globalSequenceId: number; frames: number[]; values: TrackValue[]; inTans: TrackValue[]; outTans: TrackValue[] };
@@ -250,10 +252,18 @@ function particleMaterial(filterMode: number, texture: THREE.Texture): THREE.Mes
   return mat;
 }
 
-async function resolveTexture(tex: TextureLike, rows = 1, columns = 1): Promise<TextureSlot> {
-  if (tex.replaceableId === 1 || tex.replaceableId === 2) return { texture: getFallbackTexture(tex.replaceableId === 1 ? 'team-color' : 'team-glow', rows, columns), path: tex.path, replaceableId: tex.replaceableId };
+async function resolveTexture(model: AnyModel, index: number): Promise<TextureSlot> {
+  const tex = model.textures[index];
+  if (tex.replaceableId === 1 || tex.replaceableId === 2) return { texture: getFallbackTexture(tex.replaceableId === 1 ? 'team-color' : 'team-glow'), path: tex.path, replaceableId: tex.replaceableId };
   const real = tex.path ? await assets.texture(tex.path) : null;
-  const texture = real ?? getFallbackTexture(tex.path || `replaceable-${tex.replaceableId}`, rows, columns);
+  // Missing originals come from the open texture pack: hand-written generators for effect
+  // textures, or a skin baked onto this model's UV layout for unit textures.
+  let texture = real;
+  if (!texture && tex.path && (hasSkinRecipe(tex.path) || !hasOpenTexture(tex.path))) {
+    const baked = bakeSkin(model as unknown as Parameters<typeof bakeSkin>[0], index);
+    if (baked) texture = canvasTexture(baked, `fallback:baked:${tex.path}`);
+  }
+  texture ??= getFallbackTexture(tex.path || `replaceable-${tex.replaceableId}`);
   texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
   texture.colorSpace = THREE.SRGBColorSpace;
   return { texture, path: tex.path, replaceableId: tex.replaceableId };
@@ -321,7 +331,7 @@ export class MdxModel {
   }
 
   async prepare(): Promise<void> {
-    for (const tex of this.source.textures) this.textures.push(await resolveTexture(tex));
+    for (let i = 0; i < this.source.textures.length; i++) this.textures.push(await resolveTexture(this.source, i));
     this.prepareNodes();
     this.prepareGeosets();
   }
@@ -662,18 +672,9 @@ class ParticleEmitter2View {
   private lastKey = -1;
   private readonly material: THREE.MeshBasicMaterial;
   private readonly texture: THREE.Texture;
-  private readonly texturePath: string;
-  private readonly warmEffect: boolean;
-  private readonly sizeScale: number;
-  private readonly alphaScale: number;
 
   constructor(private readonly instance: MdxInstance, private readonly emitter: ParticleEmitter2Like) {
     const modelTex = instance.model.textures[emitter.textureId];
-    this.texturePath = modelTex?.path ?? emitter.name;
-    this.warmEffect = /(?:lgh_fb|fb2|epicexplosion|explosionbig)/i.test(instance.model.path);
-    const pointStar = /(?:star|eyeglow|eye|sparkle)/i.test(this.texturePath) && !/(?:shockwave|flare|glow64|clouds)/i.test(this.texturePath);
-    this.sizeScale = pointStar ? 0.16 : 1;
-    this.alphaScale = pointStar ? 0.55 : 1;
     const baseTex = emitter.replaceableId === 1 ? instance['teamColorTexture'] : emitter.replaceableId === 2 ? instance['teamGlowTexture'] : modelTex?.texture;
     this.texture = baseTex?.name.startsWith('fallback:')
       ? getFallbackTexture(modelTex?.path ?? emitter.name, emitter.rows, emitter.columns)
@@ -766,7 +767,7 @@ class ParticleEmitter2View {
     for (let i = 0; i < count; i++) {
       const p = this.particles[i];
       const age = 1 - p.health / Math.max(0.001, p.life);
-      const scale = this.segmentScale(age) * this.sizeScale;
+      const scale = this.segmentScale(age);
       const col = this.segmentColor(age);
       const loc = modelToThree(p.location.clone());
       const half = Math.max(1, scale * 0.5);
@@ -805,14 +806,7 @@ class ParticleEmitter2View {
     const c0 = this.emitter.segmentColors[i0];
     const c1 = this.emitter.segmentColors[i1];
     const c = new THREE.Color(THREE.MathUtils.lerp(c0[0], c1[0], f), THREE.MathUtils.lerp(c0[1], c1[1], f), THREE.MathUtils.lerp(c0[2], c1[2], f)) as THREE.Color & { a: number };
-    if (this.warmEffect) {
-      const warmR = Math.max(c.r, c.b * 0.95);
-      const warmG = Math.max(c.g * 0.72, c.b * 0.72);
-      c.r = warmR;
-      c.g = Math.min(1, warmG);
-      c.b *= 0.18;
-    }
-    c.a = THREE.MathUtils.lerp(this.emitter.segmentAlphas[i0] / 255, this.emitter.segmentAlphas[i1] / 255, f) * this.instance.opacity * this.alphaScale * (this.warmEffect && this.emitter.filterMode === 0 ? 0.45 : 1);
+    c.a = THREE.MathUtils.lerp(this.emitter.segmentAlphas[i0] / 255, this.emitter.segmentAlphas[i1] / 255, f) * this.instance.opacity;
     return c;
   }
 
@@ -824,17 +818,26 @@ class ParticleEmitter2View {
     return THREE.MathUtils.lerp(this.emitter.segmentScaling[i0], this.emitter.segmentScaling[i1], f);
   }
 
+  /** Sprite-sheet cell for a particle at life fraction t, as WC3 picks it (see mdx-m3-viewer's getCell). */
   private uvFor(p: Particle2, t: number): [number, number, number, number] {
-    const intervals = p.tail ? this.emitter.tailIntervals : this.emitter.headIntervals;
-    const interval = t < this.emitter.timeMiddle ? intervals[0] : intervals[1];
-    const start = interval?.[0] ?? 0;
-    const end = interval?.[1] ?? start;
-    const cell = Math.floor(THREE.MathUtils.lerp(start, end, t) + p.cellOffset) % Math.max(1, this.emitter.rows * this.emitter.columns);
-    const col = cell % Math.max(1, this.emitter.columns);
-    const row = Math.floor(cell / Math.max(1, this.emitter.columns));
-    const cw = 1 / Math.max(1, this.emitter.columns);
-    const ch = 1 / Math.max(1, this.emitter.rows);
-    return [col * cw, row * ch, (col + 1) * cw, (row + 1) * ch];
+    const cols = Math.max(1, this.emitter.columns);
+    const rows = Math.max(1, this.emitter.rows);
+    let cell: number;
+    if (this.emitter.replaceableId === 1) cell = p.cellOffset;
+    else {
+      const middle = this.emitter.timeMiddle;
+      const second = t >= middle;
+      const f = Math.min(1, second ? (t - middle) / Math.max(1e-6, 1 - middle) : t / Math.max(1e-6, middle));
+      const intervals = p.tail ? this.emitter.tailIntervals : this.emitter.headIntervals;
+      const interval = intervals[second ? 1 : 0];
+      const start = interval?.[0] ?? 0;
+      const count = (interval?.[1] ?? start) - start;
+      const repeat = interval?.[2] ?? 1;
+      cell = count > 0 ? Math.min(start + (Math.floor(count * repeat * f) % count), rows * cols - 1) : start;
+    }
+    const col = cell % cols;
+    const row = Math.floor(cell / cols);
+    return [col / cols, row / rows, (col + 1) / cols, (row + 1) / rows];
   }
 }
 

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { openTextureCanvas } from '../opentex/particles';
 
 const cache = new Map<string, THREE.Texture>();
 
@@ -24,7 +25,7 @@ function putRadial(g: CanvasRenderingContext2D, x: number, y: number, r: number,
   g.fill();
 }
 
-function textureFromCanvas(canvas: HTMLCanvasElement, name: string, repeat = true): THREE.Texture {
+export function canvasTexture(canvas: HTMLCanvasElement, name: string, repeat = true): THREE.Texture {
   const tex = new THREE.CanvasTexture(canvas);
   tex.name = name;
   tex.colorSpace = THREE.SRGBColorSpace;
@@ -180,7 +181,7 @@ export function getFallbackTexture(path: string, rows = 1, columns = 1): THREE.T
   const key = `${path.toLowerCase()}|${rows}|${columns}`;
   let tex = cache.get(key);
   if (!tex) {
-    tex = textureFromCanvas(proceduralCanvas(path, rows, columns), `fallback:${path}`);
+    tex = canvasTexture(openTextureCanvas(path, rows, columns) ?? proceduralCanvas(path, rows, columns), `fallback:${path}`);
     cache.set(key, tex);
   }
   return tex;
@@ -197,5 +198,5 @@ export function makeTeamColorTexture(color: THREE.Color, glow = false): THREE.Te
     g.fillStyle = `rgb(${Math.round(color.r * 255)},${Math.round(color.g * 255)},${Math.round(color.b * 255)})`;
     g.fillRect(0, 0, s, s);
   }
-  return textureFromCanvas(c, glow ? 'team-glow' : 'team-color');
+  return canvasTexture(c, glow ? 'team-glow' : 'team-color');
 }

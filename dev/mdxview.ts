@@ -25,14 +25,16 @@ const grid = new THREE.GridHelper(3800, 38, 0x5c2a19, 0x2b1510);
 grid.position.y = 1;
 scene.add(grid);
 
-const names = [
+const params = new URLSearchParams(location.search);
+const focus = params.get('focus');
+const names = focus ? focus.split(',') : [
   'BloodelfWizard.mdx', 'fb2.mdx', 'LGH_FB.mdx', 'epicexplosion1.mdx', 'epicexplosion2.mdx', 'ExplosionBIG.mdx',
   'ArcaneGlaive.mdx', 'ArcaneExplosion.mdx', 'Nova_yellow.mdx', 'shield.mdx', 'sword.mdx', 'Thunderclap_nosplat.mdx', 'Blue_WarStompCaster.mdx',
 ];
 const teamColors = [0xff2020, 0x2080ff, 0x20d050, 0xa050ff, 0xffb020, 0x20d8e8];
 const instances: MdxInstance[] = [];
 const labels: THREE.Sprite[] = [];
-const positions: [number, number][] = [
+const positions: [number, number][] = focus ? names.map((_, i) => [i * 300 - (names.length - 1) * 150, 0]) : [
   [0, -120],
   [520, -220],
   [930, -220],
@@ -96,18 +98,18 @@ async function main() {
     const [x, z] = positions[i] ?? [(i % cols - (cols - 1) / 2) * 520, (Math.floor(i / cols) - 1) * 520];
     inst.position.set(x, 0, z);
     inst.teamColor = new THREE.Color(teamColors[i % teamColors.length]);
-    inst.setSequence(chooseSequence(names[i]), true);
-    if (names[i] === 'BloodelfWizard.mdx') inst.scale.setScalar(2.2);
+    inst.setSequence(params.get('seq') ?? chooseSequence(names[i]), true);
+    if (names[i] === 'BloodelfWizard.mdx' && !focus) inst.scale.setScalar(2.2);
     if (/explosion|warstomp|thunderclap/i.test(names[i])) inst.scale.setScalar(1.4);
     scene.add(inst);
     instances.push(inst);
     const l = label(names[i].replace('.mdx', ''));
     l.position.set(x, 260, z);
-    scene.add(l);
+    if (!focus) scene.add(l);
     labels.push(l);
   }
   // Small perf group: 12 extra warlocks hidden behind the camera target, updated every frame.
-  const warlock = await loadMdxModel('BloodelfWizard.mdx');
+  const warlock = focus ? null : await loadMdxModel('BloodelfWizard.mdx');
   if (warlock) {
     for (let i = 0; i < 12; i++) {
       const w = warlock.createInstance();
@@ -137,10 +139,19 @@ function frame(now: number) {
   requestAnimationFrame(frame);
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
-  camera.position.set(1500, 1280, 1780);
-  camera.lookAt(0, 80, 80);
+  if (focus) {
+    const d = +(params.get('d') ?? 420);
+    const yaw = +(params.get('yaw') ?? 30) * Math.PI / 180;
+    const h = +(params.get('h') ?? 80);
+    camera.position.set(Math.sin(yaw) * d, h + d * 0.35, Math.cos(yaw) * d);
+    camera.lookAt(0, h, 0);
+  } else {
+    camera.position.set(1500, 1280, 1780);
+    camera.lookAt(0, 80, 80);
+  }
   const before = performance.now();
-  for (const inst of instances) inst.update(dt, camera);
+  const at = params.get('at');
+  for (const inst of instances) inst.update(at && inst.globalMs >= +at ? 0 : Math.min(dt, at ? +at - inst.globalMs : dt), camera);
   perfMs += performance.now() - before;
   perfFrames++;
   if (perfFrames === 60) {
