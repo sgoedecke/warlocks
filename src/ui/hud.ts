@@ -393,6 +393,9 @@ export class Hud {
         this.floats.push({ text: e.text, color, x: e.x, y: e.y, t: 0 });
         break;
       }
+      case 'left':
+        this.message(`${playerName(P(e.pid))} has left the game.`, 8);
+        break;
       case 'announcement':
         this.center(e.text, 1.8);
         this.message(`<span style="color:#ffcc00">${esc(e.text)}</span>`, 6);
@@ -626,7 +629,7 @@ export class Hud {
 
   private updateMultiboard() {
     const rows = this.sim.ranking().map((p) => {
-      const cls = this.sim.phase !== 'shop' && !p.alive ? 'dead' : '';
+      const cls = p.left ? 'left' : this.sim.phase !== 'shop' && !p.alive ? 'dead' : '';
       return `<tr class="${cls}"><td>${playerName(p)}${p.id === this.localId ? ' *' : ''}</td><td>${p.stats.wins}</td><td>${p.stats.kills}</td><td>${p.stats.deaths}</td></tr>`;
     });
     const html = `<tr><th>Player</th><th>W</th><th>K</th><th>D</th></tr>${rows.join('')}`;

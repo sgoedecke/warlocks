@@ -59,6 +59,31 @@ The map's models borrow all of their textures from the base game. `src/render/op
 | `Space` / `F1` | Centre camera on hero |
 | `Tab` | Multiboard |
 | `F10` / `Esc` | Menu |
+| `Enter` | Chat (online games) |
+
+## Online multiplayer
+
+Click **Host Game** on the main menu to open a lobby using the settings on the left. The lobby shows a room code and a **Copy invite link** button (`?join=CODE`). Friends enter the code under **Join** or open the link. The host can add or remove computer players and set their difficulty, then starts the game. Up to 10 players can take part, humans and computers combined.
+
+How it works:
+
+- **Signalling.** [Trystero](https://github.com/dmotz/trystero) finds peers through public Nostr relays, so no game server is needed. The room code is also the password that encrypts the WebRTC handshake on those relays. After that, game traffic goes directly between browsers over WebRTC data channels.
+- **Lockstep, as WC3 does it.** Only orders are sent, never game state. Clients send their orders to the host. Every 2 ticks (60 ms) the host bundles everything it has received into a turn, broadcasts it, and plays it. Clients play a turn once it arrives and keep about 3 ticks queued to absorb jitter, gently speeding up or slowing down to hold that buffer. The host never waits for anyone.
+- **Bots run on every peer.** They are deterministic, so their orders don't cross the network.
+- **Determinism.** The sim uses its own `sin`, `cos`, `atan2` and `hypot` (`src/sim/dmath.ts`). JS engines may round `Math.sin` and similar functions differently. Every ~2 s, each client sends the host a hash of its state. A client that falls out of sync is dropped.
+- **Leavers.** As in the original map, a player who leaves has their warlock removed and is greyed out on the multiboard. A closed tab is noticed at once; a dead connection after 10 s. If the host leaves, the game ends.
+- **Background tabs.** Online, the sim keeps ticking from a worker timer when the tab is hidden, so a backgrounded host doesn't freeze the game. The game menu doesn't pause.
+
+### NAT traversal and TURN
+
+The game uses public STUN servers (Google and Cloudflare) to open direct connections. That works for most home networks. It fails when either player is behind a symmetric NAT or carrier-grade NAT (common on mobile hotspots), or on a strict office, university or VPN network. Those players need a TURN relay, and there is no reliable public TURN server that doesn't need an account. To add one, set these when building:
+
+```sh
+VITE_TURN_URL=turn:turn.example.com:3478,turns:turn.example.com:443 \
+VITE_TURN_USERNAME=user VITE_TURN_CREDENTIAL=secret npm run build
+```
+
+Free options include [Metered Open Relay](https://www.metered.ca/tools/openrelay/), which needs a free account, and self-hosted [coturn](https://github.com/coturn/coturn). Credentials set this way end up in the built JavaScript, so use a limited or time-boxed account.
 
 ## Graphics and power use
 
@@ -84,21 +109,22 @@ MDX models are skinned on the GPU. Each instance uploads one palette of averaged
 
 ```
 src/config.ts          0.88b constants, spell/shop/item metadata, original asset paths
-src/sim/               deterministic command-driven sim; no Math.random in sim
+src/sim/               deterministic command-driven sim; no Math.random, own trig (dmath.ts)
 src/ai/bot.ts          seeded command-only bots
 src/assets/            MPQ/BLP/MDX loading from user-supplied archives
 src/render/            Three.js renderer: WC3 tile terrain, MDX models, procedural fallbacks
 src/render/opentex/    open-source replacement textures, skins and icons
 src/ui/hud.ts          WC3 console, command card, shops, minimap, multiboard, tooltips
 src/audio.ts           original sound files when available, procedural WebAudio otherwise
-src/main.ts            menu, input, fixed-step loop, camera, dev autostart hook
+src/net/               Trystero session and lobby, lockstep turns, command validation
+src/main.ts            menu, lobby, input, fixed-step/lockstep loop, camera, dev autostart hook
 scripts/simtest.ts     deterministic headless verification
 dev/mdxview.html       dev-only model viewer (?focus=Model.mdx&seq=&yaw=&d=&h=&at=ms)
 dev/opentex.html       dev-only gallery of the open texture pack
 dev/icons.html         dev-only gallery of the open command icons
 ```
 
-The sim is lockstep-friendly: all mutation enters through `Command` objects (`move`, `stop`, `cast`, `buy`, `sell`, `ready`, `toggle`) and all randomness uses `Rng`. Sim events carry the original model and sound paths (e.g. `war3mapImported\\CFirstBlood.mp3`), and the renderer and audio look those up in the loaded archives.
+The sim runs in lockstep: all mutation enters through `Command` objects (`move`, `stop`, `cast`, `buy`, `sell`, `ready`, `toggle`, `leave`) and all randomness uses `Rng`. Sim events carry the original model and sound paths (e.g. `war3mapImported\\CFirstBlood.mp3`), and the renderer and audio look those up in the loaded archives.
 
 ## Known deviations / skipped 0.88b features
 

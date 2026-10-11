@@ -45,7 +45,7 @@ export interface Warlock {
   spells: Partial<Record<SpellId, number>>;
   chosen: Partial<Record<SpellColumn, SpellId>>;
   cooldowns: Partial<Record<SpellId, number>>;
-  gold: number; ready: boolean;
+  gold: number; ready: boolean; left: boolean;
   spawnProtection: number;
   shield: number; windwalk: number; windwalkSpeed: number; thrust: ThrustState | null; link: LinkState | null; frozen: FreezeState | null; timeshift: TimeShiftState | null; rush: RushState | null;
   inLava: boolean; terrain: string;
@@ -99,6 +99,7 @@ export type GameEvent =
   | { t: 'roundWinner'; pid: number }
   | { t: 'error'; pid: number; msg: string }
   | { t: 'buy'; pid: number; product: ProductId; level: number; gold: number }
+  | { t: 'left'; pid: number }
   | { t: 'gameOver' };
 
 export type Command =
@@ -108,7 +109,8 @@ export type Command =
   | { pid: number; type: 'buy'; product: ProductId }
   | { pid: number; type: 'sell'; slot: number }
   | { pid: number; type: 'ready' }
-  | { pid: number; type: 'toggle'; spell: 'firespray' | 'splitter' };
+  | { pid: number; type: 'toggle'; spell: 'firespray' | 'splitter' }
+  | { pid: number; type: 'leave' };
 
 export interface PlayerSetup { name: string; color: number; isBot: boolean; team?: number }
 

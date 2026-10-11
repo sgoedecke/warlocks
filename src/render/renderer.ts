@@ -352,6 +352,12 @@ export class GameRenderer {
       const y = p.py + (p.y - p.py) * alpha;
       const facing = lerpAngle(p.pfacing, p.facing, alpha);
       const m = v.model;
+      if (p.left) {
+        m.root.visible = false;
+        if (v.mdx) v.mdx.visible = false;
+        v.shadow.visible = v.bubble.visible = false;
+        continue;
+      }
       if (p.alive && !v.wasAlive) {
         v.deadT = 0;
         m.root.rotation.set(0, 0, 0);

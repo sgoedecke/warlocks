@@ -1,5 +1,6 @@
 import { ALL_SPELLS, ITEMS, SPELLS, spellPrice, type ProductId, type SpellId } from '../config';
 import { Rng } from '../sim/rng';
+import { dcos, datan2, dhypot, dsin } from '../sim/dmath';
 import type { Sim } from '../sim/game';
 import type { Command, Projectile, Warlock } from '../sim/types';
 
@@ -85,7 +86,7 @@ export class Bot {
   private move(me: Warlock, x: number, y: number): Command { return { pid: me.id, type: 'move', x, y }; }
 
   private fight(sim: Sim, me: Warlock): Command[] {
-    const myD = Math.hypot(me.x, me.y);
+    const myD = dhypot(me.x, me.y);
     const safeR = sim.arenaRadius * 0.72;
     const toCx = myD > 1 ? -me.x / myD : 0;
     const toCy = myD > 1 ? -me.y / myD : 0;
@@ -102,21 +103,21 @@ export class Bot {
       if (threat.time < 0.35 && this.ready(me, 'timeshift')) return [this.cast(me, 'timeshift', me.x, me.y)];
       let px = -threat.vy, py = threat.vx;
       if ((me.x - threat.x) * px + (me.y - threat.y) * py < 0) { px = -px; py = -py; }
-      const d = Math.hypot(px, py) || 1;
+      const d = dhypot(px, py) || 1;
       return [this.move(me, me.x + px / d * 220 + toCx * 120, me.y + py / d * 220 + toCy * 120)];
     }
     if (busy) return [];
     const target = this.chooseTarget(sim, me);
     if (!target) return [this.move(me, 0, 0)];
-    const dist = Math.hypot(target.x - me.x, target.y - me.y);
+    const dist = dhypot(target.x - me.x, target.y - me.y);
     const tvx = (target.mvx + target.vx) / 0.03;
     const tvy = (target.mvy + target.vy) / 0.03;
     const aimAt = (speed: number) => {
       const t = (dist / speed) * this.p.lead;
       const ax = target.x + tvx * t;
       const ay = target.y + tvy * t;
-      const a = Math.atan2(ay - me.y, ax - me.x) + this.rng.range(-this.p.aimErr, this.p.aimErr);
-      return { x: me.x + Math.cos(a) * Math.max(200, dist), y: me.y + Math.sin(a) * Math.max(200, dist) };
+      const a = datan2(ay - me.y, ax - me.x) + this.rng.range(-this.p.aimErr, this.p.aimErr);
+      return { x: me.x + dcos(a) * Math.max(200, dist), y: me.y + dsin(a) * Math.max(200, dist) };
     };
     if (this.rng.chance(this.p.aggression)) {
       if (this.ready(me, 'scourge') && dist < 230) return [this.cast(me, 'scourge', me.x, me.y)];
@@ -139,11 +140,11 @@ export class Bot {
     if (this.rng.chance(0.08)) this.strafe *= -1;
     const want = 420 + this.rng.range(-90, 120);
     let ax = me.x - target.x, ay = me.y - target.y;
-    const ad = Math.hypot(ax, ay) || 1; ax /= ad; ay /= ad;
+    const ad = dhypot(ax, ay) || 1; ax /= ad; ay /= ad;
     const rot = 0.75 * this.strafe;
-    let gx = target.x + (ax * Math.cos(rot) - ay * Math.sin(rot)) * want;
-    let gy = target.y + (ax * Math.sin(rot) + ay * Math.cos(rot)) * want;
-    const gd = Math.hypot(gx, gy);
+    let gx = target.x + (ax * dcos(rot) - ay * dsin(rot)) * want;
+    let gy = target.y + (ax * dsin(rot) + ay * dcos(rot)) * want;
+    const gd = dhypot(gx, gy);
     if (gd > safeR) { gx *= safeR / gd; gy *= safeR / gd; }
     return [this.move(me, gx, gy)];
   }
@@ -154,8 +155,8 @@ export class Bot {
     let best: Warlock | null = null, bs = -Infinity;
     for (const o of sim.players) {
       if (!o.alive || !sim.isEnemy(me, o) || !sim.isVisibleTo(o, me.id)) continue;
-      const edge = Math.hypot(o.x, o.y) / Math.max(1, sim.arenaRadius);
-      const score = -Math.hypot(o.x - me.x, o.y - me.y) + edge * 500 + (100 - o.hp) * 2 + this.rng.range(0, 150);
+      const edge = dhypot(o.x, o.y) / Math.max(1, sim.arenaRadius);
+      const score = -dhypot(o.x - me.x, o.y - me.y) + edge * 500 + (100 - o.hp) * 2 + this.rng.range(0, 150);
       if (score > bs) { bs = score; best = o; }
     }
     this.targetId = best?.id ?? -1;
@@ -172,10 +173,10 @@ export class Bot {
       const t = (rx * vx + ry * vy) / v2;
       if (t < 0 || t > 0.9) continue;
       const cx = pr.x + vx * t - me.x, cy = pr.y + vy * t - me.y;
-      if (Math.hypot(cx, cy) > pr.radius + 60) continue;
+      if (dhypot(cx, cy) > pr.radius + 60) continue;
       if (!best || t < best.time) best = { time: t, x: pr.x, y: pr.y, vx, vy };
     }
-    for (const m of sim.meteors) if (Math.hypot(me.x - m.x, me.y - m.y) < 260) {
+    for (const m of sim.meteors) if (dhypot(me.x - m.x, me.y - m.y) < 260) {
       const ax = me.x - m.x || 1, ay = me.y - m.y;
       if (!best || m.timer < best.time) best = { time: m.timer, x: m.x, y: m.y, vx: -ay, vy: ax };
     }

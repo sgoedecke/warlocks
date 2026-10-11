@@ -226,6 +226,10 @@ body {
   text-decoration: line-through;
 }
 
+.multiboard tr.left td:first-child span {
+  color: #808080 !important;
+}
+
 .multiboard.collapsed table {
   display: none;
 }
@@ -854,4 +858,147 @@ body {
 .assets-note b {
   color: var(--gold);
   font-weight: normal;
+}
+
+/* ---------- online play ---------- */
+
+.side-col {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  width: 330px;
+}
+
+#menu .side-col .panel {
+  width: auto;
+}
+
+#menu .assets-panel {
+  flex: 1;
+}
+
+.mp-hint {
+  color: #888;
+  font-size: 12.5px;
+  margin-top: 8px;
+}
+
+.mp-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.mp-row input,
+.chat-input {
+  font-family: var(--font);
+  font-size: 14px;
+  background: #050403;
+  color: #fff;
+  border: 1px solid #6a5426;
+  padding: 4px 8px;
+}
+
+.mp-row input {
+  flex: 1;
+  min-width: 0;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+}
+
+.mp-notice,
+.mp-note {
+  color: #ff9a6a;
+  font-size: 13px;
+  line-height: 1.45;
+  margin-top: 10px;
+}
+
+.mp-note {
+  color: #c8a060;
+  text-align: center;
+}
+
+#menu .lobby-panel {
+  width: 480px;
+}
+
+.lobby-code {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--gold);
+}
+
+.lobby-code b {
+  font-size: 28px;
+  letter-spacing: 4px;
+  color: #fff;
+  flex: 1;
+}
+
+.lobby-status {
+  color: #c8a060;
+  margin: 10px 0;
+  font-size: 14px;
+}
+
+.lobby-players {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 8px;
+}
+
+.lobby-players td {
+  padding: 4px 6px;
+  border-bottom: 1px solid #2a2010;
+}
+
+.lobby-players td:first-child {
+  width: 22px;
+}
+
+.lobby-players .swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 1px solid #000;
+}
+
+.lobby-players .tags {
+  color: #999;
+  font-size: 13px;
+  text-align: right;
+}
+
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.stepper .wc-btn {
+  min-width: 34px;
+  padding: 2px 8px;
+}
+
+.lobby-rules {
+  color: #aaa;
+  font-size: 13px;
+  margin: 8px 0 4px;
+}
+
+#menu .buttons {
+  display: flex;
+  justify-content: center;
+  gap: 14px;
+  margin: 14px 0 10px;
+}
+
+.chat-input {
+  position: absolute;
+  left: 14px;
+  bottom: calc(var(--console-h) + 34px);
+  width: 40%;
+  z-index: 20;
 }

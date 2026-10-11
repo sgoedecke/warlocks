@@ -4,13 +4,16 @@ import {
 } from './config';
 import { Bot, type Difficulty } from './ai/bot';
 import { Sim } from './sim/game';
-import type { Command, GameEvent, PlayerSetup } from './sim/types';
+import type { Command, GameEvent, PlayerSetup, SimRules } from './sim/types';
 import { GameRenderer } from './render/renderer';
 import { loadRealIcons, makeCursor } from './render/textures';
-import { Hud, SHOP_ICON_PATHS } from './ui/hud';
+import { Hud, playerName, SHOP_ICON_PATHS } from './ui/hud';
 import { SoundSystem, type Sfx } from './audio';
 import { addFiles, assetStatus, initAssets, onAssetStatus, removeArchive, type ArchiveRole, type AssetStatus } from './assets/loader';
 import { clearMdxCache } from './render/mdx';
+import { BUFFER_TICKS, HASH_EVERY, hashString, type Lockstep } from './net/lockstep';
+import { workerInterval } from './net/timer';
+import { MAX_PLAYERS, NetSession, normalizeCode, type LobbyState, type NetRules, type StartInfo } from './net/session';
 
 /** Dev-only overrides of the graphics preset, for benchmarking. */
 interface GraphicsOverrides {
@@ -78,13 +81,38 @@ const CAST_SFX: Partial<Record<SpellId, Sfx>> = {
   displacement: 'swap', thrust: 'thrust', shield: 'shield', windwalk: 'windwalk',
 };
 
+interface GameSetup {
+  players: PlayerSetup[];
+  seed: number;
+  rules: Partial<SimRules>;
+  difficulty: Difficulty;
+  localId: number;
+  net?: { session: NetSession; lockstep: Lockstep };
+}
+
+function rulesFrom(s: Settings): NetRules {
+  return { mode: s.mode, rounds: s.rounds, pointLimit: s.pointLimit, teams: s.teams, arenaShape: s.arenaShape, startingGold: s.startingGold };
+}
+
+function singlePlayerSetup(settings: Settings): GameSetup {
+  const players: PlayerSetup[] = [{ name: settings.name || 'Player', color: settings.color, isBot: false }];
+  const names = [...BOT_NAMES].sort(() => Math.random() - 0.5);
+  const colors = PLAYER_COLORS.map((_, i) => i).filter((c) => c !== settings.color);
+  for (let i = 0; i < settings.bots; i++) players.push({ name: names[i], color: colors[i], isBot: true });
+  return { players, seed: (Math.random() * 2 ** 31) | 0, rules: rulesFrom(settings), difficulty: settings.difficulty, localId: 0 };
+}
+
 class Game {
   private sim: Sim;
   private bots: Bot[];
   private renderer: GameRenderer;
   private hud: Hud;
   private root: HTMLElement;
-  private localId = 0;
+  private localId: number;
+  private net: GameSetup['net'];
+  private chatInput: HTMLInputElement | null = null;
+  private stopHiddenTicker: (() => void) | null = null;
+  private hiddenLast = 0;
   private targeting: SpellId | null = null;
   private pending: Command[] = [];
   private mouse = { x: 0, y: 0, inside: false };
@@ -97,14 +125,13 @@ class Game {
   private disposers: (() => void)[] = [];
   private frameCap: number;
 
-  constructor(private settings: Settings, private onExit: (again: boolean) => void) {
-    const players: PlayerSetup[] = [{ name: settings.name || 'Player', color: settings.color, isBot: false }];
-    const names = [...BOT_NAMES].sort(() => Math.random() - 0.5);
-    const colors = PLAYER_COLORS.map((_, i) => i).filter((c) => c !== settings.color);
-    for (let i = 0; i < settings.bots; i++) players.push({ name: names[i], color: colors[i], isBot: true });
-    const seed = (Math.random() * 2 ** 31) | 0;
-    this.sim = new Sim({ players, seed, rules: { mode: settings.mode, rounds: settings.rounds, pointLimit: settings.pointLimit, teams: settings.teams, arenaShape: settings.arenaShape, startingGold: settings.startingGold } });
-    this.bots = this.sim.players.filter((p) => p.isBot).map((p) => new Bot(p.id, seed ^ (p.id * 7919), settings.difficulty));
+  constructor(private settings: Settings, private onExit: (again: boolean) => void, setup = singlePlayerSetup(settings)) {
+    const { players, seed } = setup;
+    this.localId = setup.localId;
+    this.net = setup.net;
+    this.sim = new Sim({ players, seed, rules: setup.rules });
+    // Bots are deterministic, so in multiplayer every peer runs all of them rather than sending their orders.
+    this.bots = this.sim.players.filter((p) => p.isBot).map((p) => new Bot(p.id, seed ^ (p.id * 7919), setup.difficulty));
     this.lockCamera = settings.lockCamera;
 
     this.root = document.createElement('div');
@@ -121,15 +148,15 @@ class Game {
       onSpell: (id) => this.activateSpell(id),
       onBuy: (id) => {
         sound.play('click');
-        this.pending.push({ pid: this.localId, type: 'buy', product: id });
+        this.queue({ pid: this.localId, type: 'buy', product: id });
       },
       onToggle: (spell) => {
         sound.play('click');
-        this.pending.push({ pid: this.localId, type: 'toggle', spell });
+        this.queue({ pid: this.localId, type: 'toggle', spell });
       },
       onReady: () => {
         sound.play('click');
-        this.pending.push({ pid: this.localId, type: 'ready' });
+        this.queue({ pid: this.localId, type: 'ready' });
       },
       onMinimap: (x, y, button) => {
         if (button === 0) this.renderer.centerOn(x, y);
@@ -149,10 +176,78 @@ class Game {
     sound.startAmbient();
     this.hud.message(`Welcome to <span style="color:#ffcc00">Warlocks</span>! Knock your enemies into the lava. Last warlock standing wins the round.`, 14);
     this.hud.message(`Right-click to move. Press a spell hotkey then left-click to aim. <span style="color:#ffcc00">Space</span> centres the camera, <span style="color:#ffcc00">C</span> toggles camera lock.`, 14);
+    if (this.net) this.bindNet();
     this.raf = requestAnimationFrame(this.frame);
   }
 
-  private exit(again: boolean) {
+  private bindNet() {
+    const { session } = this.net!;
+    const btn = (act: string) => this.root.querySelector<HTMLElement>(`[data-act="${act}"]`);
+    btn('again')!.textContent = 'Back to Lobby';
+    for (const b of this.root.querySelectorAll<HTMLElement>('[data-act="quit"]')) b.textContent = 'Leave Game';
+    btn('resume')!.insertAdjacentHTML('beforebegin', '<div class="mp-note">Online game: the game keeps running while this menu is open.</div>');
+    session.events = {
+      onChat: (pid, text) => this.hud.message(`${playerName(this.sim.players[pid])}: ${escapeHtml(text)}`, 12),
+      onClosed: (reason) => {
+        if (this.sim.phase === 'gameOver') return;
+        this.hud.center(escapeHtml(reason), 6);
+        this.hud.message(`<span style="color:#ff6060">${escapeHtml(reason)} The game cannot continue.</span>`, 60);
+        this.setPaused(true);
+      },
+      onLobby: () => {
+        if (this.sim.phase === 'gameOver') this.hud.message('The host is back in the lobby.', 10);
+      },
+      onStart: (info, ls) => {
+        this.dispose();
+        startNetGame(session, info, ls);
+      },
+    };
+    this.chatInput = document.createElement('input');
+    this.chatInput.className = 'chat-input hidden';
+    this.chatInput.maxLength = 120;
+    this.chatInput.placeholder = 'Say:';
+    this.root.appendChild(this.chatInput);
+    const closeChat = () => {
+      this.chatInput!.value = '';
+      this.chatInput!.classList.add('hidden');
+      this.chatInput!.blur();
+    };
+    this.listen(this.chatInput, 'keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') {
+        session.chat(this.chatInput!.value);
+        closeChat();
+      } else if (e.key === 'Escape') closeChat();
+    });
+    this.listen(this.chatInput, 'blur', closeChat);
+    const onVisibility = () => {
+      this.stopHiddenTicker?.();
+      this.stopHiddenTicker = null;
+      if (document.hidden) {
+        this.hiddenLast = performance.now();
+        this.stopHiddenTicker = workerInterval(30, () => {
+          const now = performance.now();
+          this.simulate(Math.min(0.25, (now - this.hiddenLast) / 1000));
+          this.hiddenLast = now;
+        });
+      } else {
+        this.last = performance.now();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    this.disposers.push(() => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      this.stopHiddenTicker?.();
+    });
+  }
+
+  private openChat() {
+    if (!this.chatInput) return;
+    this.chatInput.classList.remove('hidden');
+    this.chatInput.focus();
+  }
+
+  private dispose() {
     cancelAnimationFrame(this.raf);
     clearTimeout(this.wakeTimer);
     for (const d of this.disposers) d();
@@ -160,12 +255,27 @@ class Game {
     this.renderer.dispose();
     this.root.remove();
     document.body.style.cursor = CURSORS.normal;
+  }
+
+  private exit(again: boolean) {
+    this.dispose();
     this.onExit(again);
+  }
+
+  /** A local order: straight into the next tick offline, or to the host online. */
+  private queue(cmd: Command) {
+    if (this.net) this.net.lockstep.submit(cmd);
+    else this.pending.push(cmd);
   }
 
   private setPaused(p: boolean) {
     this.paused = p;
     this.hud.setPaused(p);
+  }
+
+  /** Online the game menu doesn't stop the clock: the other players keep playing. */
+  private get simPaused() {
+    return this.paused && !this.net;
   }
 
   private listen<K extends keyof WindowEventMap>(target: Window | HTMLElement, type: K, fn: (e: WindowEventMap[K]) => void, opts?: AddEventListenerOptions) {
@@ -184,7 +294,7 @@ class Game {
 
   private issueMove(x: number, y: number) {
     if (!this.canAct()) return;
-    this.pending.push({ pid: this.localId, type: 'move', x, y });
+    this.queue({ pid: this.localId, type: 'move', x, y });
     this.renderer.addMoveMarker(x, y);
   }
 
@@ -205,14 +315,14 @@ class Game {
         sound.play('error');
         return;
       }
-      this.pending.push({ pid: this.localId, type: 'cast', spell: id, x: this.me.x, y: this.me.y });
+      this.queue({ pid: this.localId, type: 'cast', spell: id, x: this.me.x, y: this.me.y });
       this.targeting = null;
       return;
     }
     if (this.settings.quickCast && this.mouse.inside) {
       const w = this.renderer.pick(this.mouse.x, this.mouse.y);
       if (w) {
-        this.pending.push({ pid: this.localId, type: 'cast', spell: id, x: w.x, y: w.y });
+        this.queue({ pid: this.localId, type: 'cast', spell: id, x: w.x, y: w.y });
         return;
       }
     }
@@ -228,7 +338,7 @@ class Game {
       if (!w) return;
       if (e.button === 0) {
         if (this.targeting) {
-          if (this.canAct()) this.pending.push({ pid: this.localId, type: 'cast', spell: this.targeting, x: w.x, y: w.y });
+          if (this.canAct()) this.queue({ pid: this.localId, type: 'cast', spell: this.targeting, x: w.x, y: w.y });
           this.targeting = null;
         }
       } else if (e.button === 2) {
@@ -261,6 +371,11 @@ class Game {
         this.targeting = null;
         return;
       }
+      if (e.key === 'Enter' && this.chatInput) {
+        e.preventDefault();
+        this.openChat();
+        return;
+      }
       if (e.key === 'Tab') {
         e.preventDefault();
         this.hud.toggleScores();
@@ -279,7 +394,7 @@ class Game {
       }
       if (k === 'S') {
         this.targeting = null;
-        if (this.canAct()) this.pending.push({ pid: this.localId, type: 'stop' });
+        if (this.canAct()) this.queue({ pid: this.localId, type: 'stop' });
         return;
       }
       const spell = WARLOCK_CARD.find((id) => SPELLS[id].hotkey === k && (this.me.spells[id] ?? 0) > 0)
@@ -429,7 +544,7 @@ class Game {
     // Cap the frame rate: high-refresh displays would otherwise render 120+ frames a second.
     // While paused the scene is static, so a few frames a second keep it responsive.
     // An unfocused window is being watched rather than played, so it gets a lower cap too.
-    const cap = this.paused ? 10 : document.hasFocus() ? this.frameCap : Math.min(this.frameCap || 20, 20);
+    const cap = this.simPaused ? 10 : document.hasFocus() ? this.frameCap : Math.min(this.frameCap || 20, 20);
     if (cap > 0) {
       // Frame slots keep the average rate exact on any refresh rate (e.g. 60 on a 144 Hz display), not 1/n of it.
       const interval = 1000 / cap;
@@ -443,27 +558,65 @@ class Game {
     this.scheduleFrame(now);
     const dt = Math.min(0.1, (now - this.last) / 1000);
     this.last = now;
-    if (!this.paused) {
-      this.acc += dt;
-      let steps = 0;
-      while (this.acc >= DT && steps < 5) {
-        this.acc -= DT;
-        steps++;
-        const cmds = this.pending;
-        this.pending = [];
-        for (const b of this.bots) cmds.push(...b.think(this.sim));
-        this.sim.step(cmds);
-        for (const e of this.sim.events) this.handleEvent(e);
-      }
-      if (steps === 5) this.acc = 0;
-    }
+    if (!this.simPaused) this.simulate(dt);
     if (this.targeting && !this.canAct()) this.targeting = null;
     this.updateCamera(dt);
     this.updateCursorAndAoe();
     sound.setListener(this.renderer.camX, this.renderer.camY);
-    this.renderer.render(this.paused ? 1 : this.acc / DT, this.paused ? 0 : dt);
-    this.hud.update(this.paused ? 0 : dt, this.targeting, () => sound.play('tick', 0.6));
+    this.renderer.render(this.simPaused ? 1 : Math.min(1, this.acc / DT), this.simPaused ? 0 : dt);
+    this.hud.update(this.simPaused ? 0 : dt, this.targeting, () => sound.play('tick', 0.6));
   };
+
+  private tick() {
+    const tick = this.sim.tick;
+    let cmds: Command[];
+    if (this.net) cmds = this.net.lockstep.commandsFor(tick);
+    else {
+      cmds = this.pending;
+      this.pending = [];
+    }
+    for (const b of this.bots) cmds = cmds.concat(b.think(this.sim));
+    this.sim.step(cmds);
+    for (const e of this.sim.events) this.handleEvent(e);
+    if (this.net && this.sim.tick % HASH_EVERY === 0) this.net.lockstep.hash(this.sim.tick, hashString(this.sim.stateHash()));
+  }
+
+  /** Advances the sim by `dt` seconds of real time. */
+  private simulate(dt: number) {
+    if (!this.net || this.net.lockstep.isHost) {
+      // Offline, and for the host (whose clock everyone follows), play in real time.
+      this.acc += dt;
+      let steps = 0;
+      while (this.acc >= DT && steps < 8) {
+        this.acc -= DT;
+        steps++;
+        this.tick();
+      }
+      if (steps === 8) this.acc = 0;
+      return;
+    }
+    // A client can only play turns the host has sent. Keep a few ticks in hand for jitter, and
+    // run slightly fast or slow to hold that buffer steady, rather than stuttering.
+    const ls = this.net.lockstep;
+    let avail = ls.available(this.sim.tick);
+    const excess = avail - BUFFER_TICKS;
+    if (excess > 40) {
+      // Far behind (e.g. just loaded, or the tab was asleep): fast-forward.
+      for (let i = 0; i < excess - 2 && i < 300; i++) this.tick();
+      this.acc = 0;
+      return;
+    }
+    this.acc += dt * (excess > 6 ? 1.5 : excess > 1 ? 1.1 : excess < 0 ? 0.9 : 1);
+    let steps = 0;
+    while (this.acc >= DT && avail > 0 && steps < 8) {
+      this.acc -= DT;
+      avail--;
+      steps++;
+      this.tick();
+    }
+    // Starved: wait for the host rather than banking time to burst through later.
+    if (avail <= 0) this.acc = Math.min(this.acc, DT);
+  }
 }
 
 // ---------- main menu ----------
@@ -523,7 +676,7 @@ function escapeHtml(t: string) {
   return t.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 }
 
-function showMenu() {
+function showMenu(notice = '') {
   const s = loadSettings();
   const menu = document.createElement('div');
   menu.id = 'menu';
@@ -550,6 +703,17 @@ function showMenu() {
       <div class="form-row">Anti-aliasing <input type="checkbox" data-k="antialias" ${s.antialias ? 'checked' : ''}></div>
       <div class="form-row" style="justify-content:center;margin-top:18px"><button class="wc-btn big" data-start>Start Game</button></div>
     </div>
+    <div class="side-col">
+    <div class="panel frame mp-panel">
+      <div class="assets-title">Online</div>
+      <div class="mp-row">
+        <button class="wc-btn" data-host>Host Game</button>
+        <input data-code placeholder="Code" maxlength="12" spellcheck="false" autocomplete="off">
+        <button class="wc-btn" data-join>Join</button>
+      </div>
+      <div class="mp-hint">Hosting uses the settings on the left.</div>
+      <div class="mp-notice ${notice ? '' : 'hidden'}" data-notice>${escapeHtml(notice)}</div>
+    </div>
     <div class="panel frame assets-panel">
       <div class="assets-title">Original assets</div>
       <div data-asset-status></div>
@@ -560,6 +724,7 @@ function showMenu() {
         <b>war3.mpq</b>, <b>War3x.mpq</b> and <b>War3Patch.mpq</b> from a classic (1.26 or earlier) install.
         Anything missing is drawn procedurally. Files never leave your browser.
       </div>
+    </div>
     </div>
     </div>
     <div class="help">
@@ -576,7 +741,7 @@ function showMenu() {
       d.classList.add('sel');
       s.color = Number(d.dataset.c);
     }));
-  const start = () => {
+  const collect = () => {
     const get = (k: string) => menu.querySelector(`[data-k="${k}"]`) as HTMLInputElement;
     s.name = get('name').value.trim() || 'Player';
     s.bots = Number(get('bots').value);
@@ -596,12 +761,147 @@ function showMenu() {
     sound.setVolume(s.volume);
     sound.play('click');
     menu.remove();
+  };
+  const start = () => {
+    collect();
     startGame(s);
   };
+  const codeInput = menu.querySelector<HTMLInputElement>('[data-code]')!;
+  const join = () => {
+    const code = normalizeCode(codeInput.value);
+    if (code.length < 4) {
+      codeInput.focus();
+      return;
+    }
+    collect();
+    showLobby(NetSession.join(code, { name: s.name, color: s.color }));
+  };
   menu.querySelector('[data-start]')!.addEventListener('click', start);
-  menu.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') start();
+  menu.querySelector('[data-host]')!.addEventListener('click', () => {
+    collect();
+    showLobby(NetSession.host({ name: s.name, color: s.color }, rulesFrom(s), s.difficulty, Math.min(s.bots, MAX_PLAYERS - 1)));
   });
+  menu.querySelector('[data-join]')!.addEventListener('click', join);
+  menu.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    if (e.target === codeInput) join();
+    else start();
+  });
+}
+
+const MODE_LABEL = { round: 'Rounds', deathmatch: 'Deathmatch' };
+const DIFFICULTY_LABEL: Record<Difficulty, string> = { easy: 'Easy', normal: 'Normal', hard: 'Insane' };
+
+function rulesSummary(r: NetRules) {
+  return [
+    r.mode === 'round' ? `${r.rounds} rounds` : `${MODE_LABEL[r.mode]} to ${r.pointLimit} points`,
+    r.teams === 'ffa' ? 'free for all' : '2 teams',
+    `${r.arenaShape} arena`,
+    `${r.startingGold} starting gold`,
+  ].join(' · ');
+}
+
+/** The multiplayer lobby, for host and clients alike. */
+function showLobby(session: NetSession) {
+  const el = document.createElement('div');
+  el.id = 'menu';
+  el.className = 'lobby';
+  const invite = `${location.origin}${location.pathname}?join=${session.code}`;
+  el.innerHTML = `
+    <div class="title">WARLOCKS</div>
+    <div class="subtitle">${session.isHost ? 'Hosting an online game' : 'Joining an online game'}</div>
+    <div class="panel frame lobby-panel">
+      <div class="lobby-code">Room code <b>${session.code}</b> <button class="wc-btn" data-copy>Copy invite link</button></div>
+      <div class="lobby-status" data-status></div>
+      <table class="lobby-players" data-players></table>
+      ${session.isHost ? `<div class="form-row">Computer players <span class="stepper"><button class="wc-btn" data-bots="-1">−</button><span data-botcount></span><button class="wc-btn" data-bots="1">+</button></span></div>
+      <div class="form-row">Difficulty <select data-difficulty>${(['easy', 'normal', 'hard'] as Difficulty[]).map((d) => `<option value="${d}">${DIFFICULTY_LABEL[d]}</option>`).join('')}</select></div>` : ''}
+      <div class="lobby-rules" data-rules></div>
+      <div class="buttons">
+        <button class="wc-btn big" data-leave>Leave</button>
+        ${session.isHost ? '<button class="wc-btn big" data-startmp>Start Game</button>' : ''}
+      </div>
+      <div class="assets-note">Players connect to each other directly. The room code is all a friend needs: share it or the invite link.</div>
+    </div>`;
+  app.appendChild(el);
+  const q = <T extends HTMLElement>(sel: string) => el.querySelector(sel) as T;
+  const render = (l: LobbyState | null) => {
+    const status = q<HTMLElement>('[data-status]');
+    if (!l) {
+      status.textContent = 'Connecting to the host…';
+      return;
+    }
+    const humans = l.slots.filter((x) => x.peer).length;
+    status.textContent = session.isHost
+      ? (humans > 1 ? `${humans} players connected.` : 'Waiting for players to join…')
+      : 'Connected. Waiting for the host to start…';
+    q<HTMLElement>('[data-players]').innerHTML = l.slots.map((x) => {
+      const tags = [x.peer === session.hostId ? 'host' : '', x.peer === session.selfId ? 'you' : '', x.peer ? '' : DIFFICULTY_LABEL[l.difficulty].toLowerCase()].filter(Boolean).join(', ');
+      return `<tr><td><span class="swatch" style="background:${PLAYER_COLORS[x.color].css}"></span></td><td>${escapeHtml(x.name)}</td><td class="tags">${tags}</td></tr>`;
+    }).join('');
+    q<HTMLElement>('[data-rules]').textContent = rulesSummary(l.rules);
+    if (session.isHost) {
+      q<HTMLElement>('[data-botcount]').textContent = String(session.botCount);
+      q<HTMLSelectElement>('[data-difficulty]').value = l.difficulty;
+      q<HTMLButtonElement>('[data-startmp]').disabled = l.slots.length < 2;
+    }
+  };
+  const close = () => el.remove();
+  session.events = {
+    onLobby: render,
+    onStart: (info, ls) => {
+      close();
+      startNetGame(session, info, ls);
+    },
+    onClosed: (reason) => {
+      close();
+      showMenu(reason);
+    },
+  };
+  render(session.lobby);
+  if (import.meta.env.DEV) (window as unknown as { __session: NetSession }).__session = session;
+  q('[data-copy]').addEventListener('click', () => {
+    void navigator.clipboard?.writeText(invite).then(() => (q('[data-copy]').textContent = 'Copied!'));
+  });
+  q('[data-leave]').addEventListener('click', () => {
+    sound.play('click');
+    session.events.onClosed = undefined;
+    session.close();
+    close();
+    showMenu();
+  });
+  if (session.isHost) {
+    el.querySelectorAll<HTMLElement>('[data-bots]').forEach((b) => b.addEventListener('click', () => {
+      session.setBots(session.botCount + Number(b.dataset.bots));
+    }));
+    q<HTMLSelectElement>('[data-difficulty]').addEventListener('change', (e) => session.setDifficulty((e.target as HTMLSelectElement).value as Difficulty));
+    q('[data-startmp]').addEventListener('click', () => {
+      sound.ensure();
+      sound.play('click');
+      session.startGame();
+    });
+  }
+}
+
+function startNetGame(session: NetSession, info: StartInfo, lockstep: Lockstep) {
+  const s = loadSettings();
+  sound.ensure();
+  sound.setVolume(s.volume);
+  const game = new Game(s, (again) => {
+    if (again) {
+      if (session.isHost) session.reopenLobby();
+      else session.leaveGame();
+      showLobby(session);
+    } else {
+      session.events.onClosed = undefined;
+      session.close();
+      showMenu();
+    }
+  }, {
+    players: info.players, seed: info.seed, rules: info.rules, difficulty: info.difficulty,
+    localId: lockstep.localId, net: { session, lockstep },
+  });
+  if (import.meta.env.DEV) (window as unknown as { __game: Game }).__game = game;
 }
 
 function startGame(s: Settings) {
@@ -622,7 +922,19 @@ onAssetStatus(() => {
 async function boot() {
   await initAssets();
   await iconsLoading;
-  if (import.meta.env.DEV && new URLSearchParams(location.search).has('autostart')) {
+  const joinCode = new URLSearchParams(location.search).get('join');
+  if (joinCode) {
+    const name = new URLSearchParams(location.search).get('name');
+    history.replaceState(null, '', location.pathname);
+    const s = loadSettings();
+    if (import.meta.env.DEV && name) s.name = name;
+    showLobby(NetSession.join(joinCode, { name: s.name, color: s.color }));
+  } else if (import.meta.env.DEV && new URLSearchParams(location.search).has('host')) {
+    const s = loadSettings();
+    const p = new URLSearchParams(location.search);
+    if (p.has('name')) s.name = p.get('name')!;
+    showLobby(NetSession.host({ name: s.name, color: s.color }, rulesFrom(s), s.difficulty, Number(p.get('bots') ?? 0)));
+  } else if (import.meta.env.DEV && new URLSearchParams(location.search).has('autostart')) {
     const p = new URLSearchParams(location.search);
     const s = { ...loadSettings(), bots: Number(p.get('bots') ?? 5), difficulty: 'hard' as Difficulty, rounds: 1, mode: 'round' as const, startingGold: 120, lockCamera: true, volume: 0, arenaShape: (p.get('arena') ?? 'square') as Settings['arenaShape'] };
     if (p.has('fps')) s.frameCap = Number(p.get('fps'));

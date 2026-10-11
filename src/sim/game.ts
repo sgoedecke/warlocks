@@ -7,6 +7,7 @@ import {
   WARLOCK_HP, WARLOCK_RADIUS, WARLOCK_TURN_RATE, spellCooldown, spellPrice, type ItemId, type ProductId, type SpellId,
 } from '../config';
 import { Rng } from './rng';
+import { dcos, datan2, dhypot, dsin } from './dmath';
 import type {
   ArenaShape, Command, FreezeState, GameEvent, Meteor, Obstacle, Phase, PlayerSetup, Projectile,
   ProjectileKind, SimRules, TerrainThemeState, TimeShiftSnapshot, Warlock,
@@ -61,7 +62,7 @@ function statBlock() {
 function itemCapacity(invLevel: number): number { return Math.floor(0.5 * (invLevel * invLevel + invLevel)); }
 function clamp(v: number, a: number, b: number) { return Math.max(a, Math.min(b, v)); }
 function norm(dx: number, dy: number): [number, number, number] {
-  const d = Math.hypot(dx, dy);
+  const d = dhypot(dx, dy);
   return d > 1e-6 ? [dx / d, dy / d, d] : [1, 0, 0];
 }
 function textSize(dmg: number): number { return 0.007 * Math.sqrt(Math.max(0, dmg) + 3.5); }
@@ -108,7 +109,7 @@ export class Sim {
       return {
         id: i, name: p.name, color: p.color, team, isBot: p.isBot,
         x: 0, y: 0, px: 0, py: 0, vx: 0, vy: 0, mvx: 0, mvy: 0, facing: 0, pfacing: 0,
-        hp: WARLOCK_HP, maxHp: WARLOCK_HP, damagePoints: 0, alive: true, deathTime: 0, respawn: 0, diedInLava: false,
+        hp: WARLOCK_HP, maxHp: WARLOCK_HP, damagePoints: 0, alive: true, left: false, deathTime: 0, respawn: 0, diedInLava: false,
         order: { type: 'idle' }, cast: null, spells: { fireball: 1, scourge: 1 }, chosen: {}, cooldowns: {}, gold: this.rules.startingGold, ready: false,
         spawnProtection: SPAWN_PROTECTION, shield: 0, windwalk: 0, windwalkSpeed: 1, thrust: null, link: null, frozen: null, timeshift: null, rush: null,
         inLava: false, terrain: this.theme.safe, lastHitBy: -1, lastHitTime: -99, contributions: [], lastCastTime: -99, lastCastSpell: null,
@@ -177,7 +178,7 @@ export class Sim {
       for (let gy = gy0 - r; gy <= gy0 + r; gy++) for (let gx = gx0 - r; gx <= gx0 + r; gx++) {
         if (gx < 0 || gy < 0 || gx >= TILE_COUNT || gy >= TILE_COUNT) continue;
         const dx = gx - gx0, dy = gy - gy0;
-        if (square ? Math.max(Math.abs(dx), Math.abs(dy)) < area : Math.hypot(dx, dy) < area) this.terrainTiles[gy * TILE_COUNT + gx] = code;
+        if (square ? Math.max(Math.abs(dx), Math.abs(dy)) < area : dhypot(dx, dy) < area) this.terrainTiles[gy * TILE_COUNT + gx] = code;
       }
     };
     // A1/WK first flood the whole map with the theme's lava (SetTerrainType(...,'d',1)); shrink steps don't.
@@ -224,13 +225,13 @@ export class Sim {
       p.y = p.py = -64;
       p.facing = p.pfacing = -Math.PI / 2;
       p.vx = p.vy = p.mvx = p.mvy = 0;
-      p.alive = true;
+      p.alive = !p.left;
       p.hp = p.maxHp;
       p.damagePoints = 0;
       p.spawnProtection = 0;
       p.order = { type: 'idle' };
       p.cast = null;
-      p.ready = false;
+      p.ready = p.left;
     }
   }
 
@@ -241,8 +242,8 @@ export class Sim {
     const off = this.rng.range(0, Math.PI * 2);
     active.forEach((p, i) => {
       const angle = this.rules.teams === '2teams' ? off + (p.team % 2) * Math.PI : off + (i / n) * Math.PI * 2;
-      p.x = p.px = Math.cos(angle) * r;
-      p.y = p.py = Math.sin(angle) * r;
+      p.x = p.px = dcos(angle) * r;
+      p.y = p.py = dsin(angle) * r;
       p.facing = p.pfacing = angle + Math.PI;
     });
   }
@@ -250,7 +251,7 @@ export class Sim {
   private resetFighter(p: Warlock, fullReset: boolean) {
     p.hp = p.maxHp;
     p.damagePoints = 0;
-    p.alive = true;
+    p.alive = !p.left;
     p.respawn = 0;
     p.spree = 0;
     p.multikillCount = 0;
@@ -298,7 +299,7 @@ export class Sim {
 
     this.phaseTimer -= DT;
     if (this.phase === 'shop') {
-      if (this.phaseTimer <= 0 || this.players.every((p) => p.ready)) this.startCombatRound();
+      if (this.phaseTimer <= 0 || this.players.every((p) => p.ready || p.left)) this.startCombatRound();
     } else if (this.phase === 'countdown') {
       if (this.phaseTimer <= 0) this.setPhase('fight', 0);
       this.updateCooldownsAndStatuses();
@@ -325,7 +326,7 @@ export class Sim {
     for (const p of this.players) {
       p.gold += GOLD_PER_ROUND;
       p.NR += LAVA_INCREASE_PER_ROUND;
-      p.ready = false;
+      p.ready = p.left;
     }
     this.toShopPositions();
     this.paintArena(8 + this.players.length / 2, true);
@@ -334,7 +335,8 @@ export class Sim {
 
   private applyCommand(c: Command) {
     const p = this.players[c.pid];
-    if (!p) return;
+    if (!p || p.left) return;
+    if (c.type === 'leave') { this.leave(p); return; }
     if (c.type === 'buy') { this.buy(p, c.product); return; }
     if (c.type === 'sell') { this.sell(p, c.slot); return; }
     if (c.type === 'ready') { if (this.phase === 'shop') p.ready = true; return; }
@@ -491,7 +493,7 @@ export class Sim {
   }
 
   private turnToward(p: Warlock, tx: number, ty: number): number {
-    const want = Math.atan2(ty - p.y, tx - p.x);
+    const want = datan2(ty - p.y, tx - p.x);
     const d = angleDiff(p.facing, want);
     const max = WARLOCK_TURN_RATE * DT;
     p.facing += clamp(d, -max, max);
@@ -499,13 +501,13 @@ export class Sim {
   }
   private controlledToward(p: Warlock, tx: number, ty: number) {
     const dx = tx - p.x, dy = ty - p.y;
-    const dist = Math.hypot(dx, dy);
+    const dist = dhypot(dx, dy);
     if (dist < 1) { p.mvx = p.mvy = 0; return; }
     const off = this.turnToward(p, tx, ty);
-    const speed = Math.max(0, p.moveSpeed + (p.rush?.speedBonus ?? 0)) * (p.windwalk > 0 ? p.windwalkSpeed : 1) * Math.max(0, Math.cos(off));
+    const speed = Math.max(0, p.moveSpeed + (p.rush?.speedBonus ?? 0)) * (p.windwalk > 0 ? p.windwalkSpeed : 1) * Math.max(0, dcos(off));
     const step = Math.min(speed * DT, dist);
-    p.mvx = Math.cos(p.facing) * step;
-    p.mvy = Math.sin(p.facing) * step;
+    p.mvx = dcos(p.facing) * step;
+    p.mvy = dsin(p.facing) * step;
   }
 
   private updateWarlock(p: Warlock) {
@@ -521,7 +523,7 @@ export class Sim {
     } else if (p.thrust) {
       const t = p.thrust;
       p.vx += t.dx * 1.56; p.vy += t.dy * 1.56;
-      t.remainingTicks -= Math.hypot(p.vx, p.vy);
+      t.remainingTicks -= dhypot(p.vx, p.vy);
       if (this.tick % 3 === 0) this.events.push({ t: 'effect', name: 'thrustAfterimage', x: p.x, y: p.y, modelPath: 'BloodelfWizard.mdl', scale: 0.92 });
       const tx = p.x + p.vx + p.mvx;
       const ty = p.y + p.vy + p.mvy;
@@ -538,7 +540,7 @@ export class Sim {
     } else {
       const o = p.order;
       if (o.type === 'move') {
-        if (Math.hypot(o.x - p.x, o.y - p.y) < 4) p.order = { type: 'idle' };
+        if (dhypot(o.x - p.x, o.y - p.y) < 4) p.order = { type: 'idle' };
         else this.controlledToward(p, o.x, o.y);
       } else if (o.type === 'cast') {
         const off = this.turnToward(p, o.x, o.y);
@@ -553,7 +555,7 @@ export class Sim {
     const terrain = this.terrainAt(p.x, p.y);
     p.terrain = terrain;
     if (terrain === ICE_TILE && !p.frozen) {
-      if (Math.hypot(p.mvx, p.mvy) > 0.001) {
+      if (dhypot(p.mvx, p.mvy) > 0.001) {
         const [nx, ny] = norm(p.mvx, p.mvy);
         const along = p.vx * nx + p.vy * ny;
         if (along <= (p.moveSpeed * DT)) { p.vx += nx * 0.315 * (p.moveSpeed / WARLOCK_BASE_SPEED); p.vy += ny * 0.315 * (p.moveSpeed / WARLOCK_BASE_SPEED); }
@@ -593,7 +595,7 @@ export class Sim {
       const a = this.players[i]; if (!a.alive) continue;
       for (let j = i + 1; j < this.players.length; j++) {
         const b = this.players[j]; if (!b.alive) continue;
-        const dx = b.x - a.x, dy = b.y - a.y; const d = Math.hypot(dx, dy) || 1; const min = WARLOCK_RADIUS * 2;
+        const dx = b.x - a.x, dy = b.y - a.y; const d = dhypot(dx, dy) || 1; const min = WARLOCK_RADIUS * 2;
         if (d >= min) continue;
         const nx = dx / d, ny = dy / d, push = (min - d) / 2;
         a.x -= nx * push; a.y -= ny * push; b.x += nx * push; b.y += ny * push;
@@ -606,7 +608,7 @@ export class Sim {
 
   private collideObstaclesWithWarlocks() { for (const o of this.obstacles) for (const p of this.players) if (p.alive) this.resolveObstacle(o, p); }
   private resolveObstacle(o: Obstacle, e: { x: number; y: number; vx: number; vy: number }, radius = WARLOCK_RADIUS, g = 0.5) {
-    const dx = e.x - o.x, dy = e.y - o.y; const d = Math.hypot(dx, dy) || 1; const min = radius + o.radius;
+    const dx = e.x - o.x, dy = e.y - o.y; const d = dhypot(dx, dy) || 1; const min = radius + o.radius;
     if (d >= min) return;
     const nx = dx / d, ny = dy / d;
     e.x = o.x + nx * min; e.y = o.y + ny * min;
@@ -650,7 +652,7 @@ export class Sim {
       case 'splitter': this.spawnProjectile(p, 'splitter', nx, ny, (p.splitterContinuous ? 475 : 700) * DT, p.splitterContinuous ? 30 : 50, 700 * (1 + 0.1 * p.IA), p.splitterContinuous ? 700 * (1 + 0.1 * p.IA) / 475 : Math.min(dist, 700 * (1 + 0.1 * p.IA)) / 700 + 0.03, lvl); break;
       case 'windwalk': p.windwalk = [3, 3.25, 3.5, 3.75, 4, 4.25, 4.5, 5][Math.min(7, lvl - 1)]; p.windwalkSpeed = (p.moveSpeed + 200) / p.moveSpeed; break;
       case 'teleport': this.teleport(p, nx, ny, Math.min(dist, 700 + 70 * lvl)); break;
-      case 'thrust': p.facing = Math.atan2(ny, nx); p.thrust = { dx: nx, dy: ny, remainingTicks: ((620 + 80 * lvl) * (1 + 0.1 * p.IA)), level: lvl }; p.vx = nx * 39; p.vy = ny * 39; break;
+      case 'thrust': p.facing = datan2(ny, nx); p.thrust = { dx: nx, dy: ny, remainingTicks: ((620 + 80 * lvl) * (1 + 0.1 * p.IA)), level: lvl }; p.vx = nx * 39; p.vy = ny * 39; break;
       case 'displacement': this.spawnProjectile(p, 'displacement', nx, ny, 1700 * DT, 40, (600 + 100 * lvl) * (1 + 0.1 * p.IA), Math.min(dist, (600 + 100 * lvl) * (1 + 0.1 * p.IA)) / 1700 + 0.03, lvl); break;
       case 'drain': this.spawnProjectile(p, 'drain', nx, ny, 600 * DT, 22, 700 * (1 + 0.1 * p.IA), Math.min(dist, 700 * (1 + 0.1 * p.IA)) / 700 * 7 / 6, lvl); break;
       case 'firespray': this.castFireSpray(p, nx, ny, lvl); break;
@@ -666,7 +668,7 @@ export class Sim {
 
   private spawnProjectile(owner: Warlock, kind: ProjectileKind, nx: number, ny: number, speedTick: number, radius: number, maxDist: number, life: number, lvl: number, cw = true, cp = true, co = true) {
     const off = WARLOCK_RADIUS + radius + 2;
-    const pr: Projectile = { id: this.nextId++, kind, owner: owner.id, x: owner.x + nx * off, y: owner.y + ny * off, px: owner.x, py: owner.y, vx: nx * speedTick, vy: ny * speedTick, ax: 0, ay: 0, radius, life, age: 0, level: lvl, traveled: 0, maxDist, returning: false, dead: false, hitIds: [], targetId: -1, damageScale: 1, splitAngle: Math.atan2(ny, nx), modelPath: PROJ_MODELS[kind] ?? SPELLS.fireball.modelPath!, scale: SPELLS[kind as SpellId]?.scale ?? 1, collidesWarlock: cw, collidesProjectile: cp, collidesObstacle: co };
+    const pr: Projectile = { id: this.nextId++, kind, owner: owner.id, x: owner.x + nx * off, y: owner.y + ny * off, px: owner.x, py: owner.y, vx: nx * speedTick, vy: ny * speedTick, ax: 0, ay: 0, radius, life, age: 0, level: lvl, traveled: 0, maxDist, returning: false, dead: false, hitIds: [], targetId: -1, damageScale: 1, splitAngle: datan2(ny, nx), modelPath: PROJ_MODELS[kind] ?? SPELLS.fireball.modelPath!, scale: SPELLS[kind as SpellId]?.scale ?? 1, collidesWarlock: cw, collidesProjectile: cp, collidesObstacle: co };
     this.projectiles.push(pr);
     this.events.push({ t: 'spawnProjectile', id: pr.id, kind, owner: owner.id, x: pr.x, y: pr.y, modelPath: pr.modelPath, scale: pr.scale });
     return pr;
@@ -692,7 +694,7 @@ export class Sim {
     this.events.push({ t: 'effect', name: 'scourge', x: p.x, y: p.y, modelPath: MODEL_PATHS.darkPortal });
     this.events.push({ t: 'effect', name: 'scourgeNova', x: p.x, y: p.y, modelPath: MODEL_PATHS.novaYellow });
     for (const o of this.players) if (this.isEnemy(p, o) && o.alive) {
-      const d = Math.hypot(o.x - p.x, o.y - p.y);
+      const d = dhypot(o.x - p.x, o.y - p.y);
       if (d <= 250) { hits++; this.damageTL(p.id, o, base, 1 - d / 1000); }
     }
     if (hits >= 3) this.events.push({ t: 'announcement', text: 'Hattrick!', soundPath: SOUND_PATHS.hattrick });
@@ -715,7 +717,7 @@ export class Sim {
     this.events.push({ t: 'lightning', pid: p.id, x1: sx, y1: sy, x2: ex, y2: ey, hit: !!(hitW || hitP), code: 'CLSB' });
     if (hitW) this.damageTL(p.id, hitW, 7 + lvl, 1);
     if (hitP) { hitP.dead = true; this.events.push({ t: 'explode', kind: hitP.kind, x: hitP.x, y: hitP.y, modelPath: MODEL_PATHS.thunderclapNoSplat }); }
-    for (const pr of this.projectiles) if (pr.owner === p.id && pr.kind === 'fireball' && Math.hypot(pr.x - ex, pr.y - ey) < 230) {
+    for (const pr of this.projectiles) if (pr.owner === p.id && pr.kind === 'fireball' && dhypot(pr.x - ex, pr.y - ey) < 230) {
       pr.dead = true;
       this.areaDamage(p.id, pr.x, pr.y, 230, 7 + lvl + 6.3 + 0.7 * (pr.level), 1, 0.5);
       this.events.push({ t: 'effect', name: 'lightningFireballCombo', x: pr.x, y: pr.y, modelPath: MODEL_PATHS.lightningCombo });
@@ -724,12 +726,12 @@ export class Sim {
   }
 
   private castFireSpray(p: Warlock, nx: number, ny: number, lvl: number) {
-    const base = Math.atan2(ny, nx);
+    const base = datan2(ny, nx);
     const angles = p.fireSprayFan ? [-11, -5.5, 0, 5.5, 11] : Array.from({ length: 5 + lvl }, () => this.rng.range(-12, 12));
     for (const deg of angles) {
       const a = base + deg * Math.PI / 180;
       const speed = (p.fireSprayFan ? 800 : 1200) * DT;
-      const pr = this.spawnProjectile(p, 'firesprayBolt', Math.cos(a), Math.sin(a), speed, p.fireSprayFan ? 23 : 22, (p.fireSprayFan ? 800 : 1000) * (1 + 0.1 * p.IA), (p.fireSprayFan ? 800 * (1 + 0.1 * p.IA) / 900 : 1000 * (1 + 0.1 * p.IA) / 1200), lvl);
+      const pr = this.spawnProjectile(p, 'firesprayBolt', dcos(a), dsin(a), speed, p.fireSprayFan ? 23 : 22, (p.fireSprayFan ? 800 : 1000) * (1 + 0.1 * p.IA), (p.fireSprayFan ? 800 * (1 + 0.1 * p.IA) / 900 : 1000 * (1 + 0.1 * p.IA) / 1200), lvl);
       pr.scale = p.fireSprayFan ? 0.8 : 0.73;
       // RW/BW pick the missile art per bolt: RedDragonMissile or the map's white fb2.
       if (this.rng.int(2) === 1) pr.modelPath = 'fb2.mdl';
@@ -770,7 +772,7 @@ export class Sim {
       if (pr.kind === 'splitter' && this.players[pr.owner]?.splitterContinuous && this.tick % 5 === 0) this.splitterBurst(pr, false);
       pr.vx += pr.ax; pr.vy += pr.ay;
       pr.x += pr.vx; pr.y += pr.vy;
-      pr.traveled += Math.hypot(pr.vx, pr.vy);
+      pr.traveled += dhypot(pr.vx, pr.vy);
       this.clampBounds(pr);
       if (pr.traveled >= pr.maxDist || pr.life <= 0) this.expireProjectile(pr);
       if (!pr.dead) this.projectileCollisions(pr);
@@ -783,7 +785,7 @@ export class Sim {
     let target = pr.targetId >= 0 ? this.players[pr.targetId] : null;
     if (!target || !target.alive || !this.isEnemy(pr.owner, target)) {
       let bd = 700;
-      for (const o of this.players) if (this.isEnemy(pr.owner, o) && o.alive && o.windwalk <= 0) { const d = Math.hypot(o.x - pr.x, o.y - pr.y); if (d < bd) { bd = d; target = o; } }
+      for (const o of this.players) if (this.isEnemy(pr.owner, o) && o.alive && o.windwalk <= 0) { const d = dhypot(o.x - pr.x, o.y - pr.y); if (d < bd) { bd = d; target = o; } }
       pr.targetId = target?.id ?? -1;
     }
     if (target) {
@@ -820,7 +822,7 @@ export class Sim {
   }
 
   private projectileCollisions(pr: Projectile) {
-    if (pr.collidesObstacle) for (const o of this.obstacles) if (Math.hypot(o.x - pr.x, o.y - pr.y) < o.radius + pr.radius) { this.resolveObstacle(o, pr, pr.radius, 1); if (pr.kind !== 'boomerang') this.expireProjectile(pr); return; }
+    if (pr.collidesObstacle) for (const o of this.obstacles) if (dhypot(o.x - pr.x, o.y - pr.y) < o.radius + pr.radius) { this.resolveObstacle(o, pr, pr.radius, 1); if (pr.kind !== 'boomerang') this.expireProjectile(pr); return; }
     if (!pr.collidesWarlock) return;
     for (const o of this.players) {
       if (!o.alive || o.id === pr.owner || pr.hitIds.includes(o.id) || !this.isEnemy(pr.owner, o)) continue;
@@ -833,12 +835,12 @@ export class Sim {
     const dx = x1 - x0, dy = y1 - y0, len2 = dx * dx + dy * dy;
     const t = len2 > 0 ? clamp(((cx - x0) * dx + (cy - y0) * dy) / len2, 0, 1) : 0;
     const px = x0 + dx * t, py = y0 + dy * t;
-    return Math.hypot(px - cx, py - cy) <= r;
+    return dhypot(px - cx, py - cy) <= r;
   }
   private projectileProjectileCollisions() {
     for (let i = 0; i < this.projectiles.length; i++) { const a = this.projectiles[i]; if (a.dead || !a.collidesProjectile) continue;
       for (let j = i + 1; j < this.projectiles.length; j++) { const b = this.projectiles[j]; if (b.dead || !b.collidesProjectile || a.owner === b.owner) continue;
-        if (Math.hypot(a.x - b.x, a.y - b.y) < a.radius + b.radius) { a.dead = b.dead = true; this.events.push({ t: 'explode', kind: 'clash', x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, modelPath: MODEL_PATHS.thunderclapNoSplat }); break; }
+        if (dhypot(a.x - b.x, a.y - b.y) < a.radius + b.radius) { a.dead = b.dead = true; this.events.push({ t: 'explode', kind: 'clash', x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, modelPath: MODEL_PATHS.thunderclapNoSplat }); break; }
       }
     }
   }
@@ -872,7 +874,7 @@ export class Sim {
   private expireProjectile(pr: Projectile) {
     if (pr.dead) return;
     if (pr.kind === 'splitter') this.splitterBurst(pr, true);
-    if (pr.kind === 'displacement') { const owner = this.players[pr.owner]; if (owner?.alive) this.teleport(owner, ...(norm(pr.x - owner.x, pr.y - owner.y).slice(0, 2) as [number, number]), Math.hypot(pr.x - owner.x, pr.y - owner.y)); }
+    if (pr.kind === 'displacement') { const owner = this.players[pr.owner]; if (owner?.alive) this.teleport(owner, ...(norm(pr.x - owner.x, pr.y - owner.y).slice(0, 2) as [number, number]), dhypot(pr.x - owner.x, pr.y - owner.y)); }
     pr.dead = true;
     const modelPath = pr.kind === 'fireball' ? MODEL_PATHS.fireballImpact : pr.kind === 'homing' ? 'Abilities\\Spells\\Human\\StormBolt\\StormBoltMissile.mdl' : pr.kind === 'freeze' ? 'Abilities\\Weapons\\FrostWyrmMissile\\FrostWyrmMissile.mdl' : pr.modelPath;
     this.events.push({ t: 'explode', kind: pr.kind, x: pr.x, y: pr.y, modelPath });
@@ -883,14 +885,14 @@ export class Sim {
     if (death) this.areaDamage(pr.owner, pr.x, pr.y, 160 * (1 + 0.12 * owner.AA), 7 + pr.level, 0.8, 0.15 * owner.AA);
     for (const deg of [-18, -12, -6, 0, 6, 12, 18]) {
       const a = pr.splitAngle + deg * Math.PI / 180;
-      this.spawnProjectile(owner, 'splitterShard', Math.cos(a), Math.sin(a), 750 * DT, 20, 750, 1, pr.level, true, false, true);
+      this.spawnProjectile(owner, 'splitterShard', dcos(a), dsin(a), 750 * DT, 20, 750, 1, pr.level, true, false, true);
     }
     this.events.push({ t: 'effect', name: 'splitterBurst', x: pr.x, y: pr.y, modelPath: MODEL_PATHS.blueWarStomp });
   }
 
   private retargetBouncer(pr: Projectile) {
     let best: Warlock | null = null, bd = Infinity;
-    for (const o of this.players) if (this.isEnemy(pr.owner, o) && o.alive && !pr.hitIds.includes(o.id)) { const d = Math.hypot(o.x - pr.x, o.y - pr.y); if (d < bd) { bd = d; best = o; } }
+    for (const o of this.players) if (this.isEnemy(pr.owner, o) && o.alive && !pr.hitIds.includes(o.id)) { const d = dhypot(o.x - pr.x, o.y - pr.y); if (d < bd) { bd = d; best = o; } }
     if (!best || pr.damageScale <= 0.2) { this.expireProjectile(pr); return; }
     const [nx, ny] = norm(best.x - pr.x, best.y - pr.y); pr.vx = nx * 900 * DT; pr.vy = ny * 900 * DT; pr.life = (750 + 150 * pr.level + 0.1 * (this.players[pr.owner]?.IA ?? 0)) / 900;
   }
@@ -915,7 +917,7 @@ export class Sim {
       if (m.timer > 0) continue;
       const r = 200 + 20 * (this.players[m.owner]?.AA ?? 0);
       this.events.push({ t: 'meteorImpact', x: m.x, y: m.y, radius: r, modelPath: m.modelPath });
-      for (const o of this.players) if (o.alive && this.isEnemy(m.owner, o)) { const d = Math.hypot(o.x - m.x, o.y - m.y); if (d <= r + WARLOCK_RADIUS) this.damageTL(m.owner, o, (10 + 2 * m.level) * (1 - Math.min(1, d / r) / 2), 0.8); }
+      for (const o of this.players) if (o.alive && this.isEnemy(m.owner, o)) { const d = dhypot(o.x - m.x, o.y - m.y); if (d <= r + WARLOCK_RADIUS) this.damageTL(m.owner, o, (10 + 2 * m.level) * (1 - Math.min(1, d / r) / 2), 0.8); }
       m.timer = -999;
     }
     this.meteors = this.meteors.filter((m) => m.timer > -900);
@@ -946,7 +948,7 @@ export class Sim {
   }
   private heal(target: Warlock, src: number, amt: number, lifesteal = false) { target.hp = Math.min(target.maxHp, target.hp + amt); target.damagePoints = Math.max(0, target.damagePoints - amt / 2); this.events.push({ t: 'damageText', pid: target.id, src, text: `+${amt.toFixed(1)}`, color: 'green', size: lifesteal ? 0.02 : textSize(amt), x: target.x, y: target.y, amount: amt }); }
   private damageText(target: Warlock, src: number, amount: number, color: 'yellow' | 'cyan' | 'green' | 'red') { this.events.push({ t: 'damageText', pid: target.id, src, text: amount.toFixed(amount >= 10 ? 0 : 1), color, size: textSize(amount), x: target.x, y: target.y, amount }); }
-  private areaDamage(src: number, x: number, y: number, radius: number, dmg: number, kf: number, minFrac: number, skip = -1) { for (const o of this.players) if (o.id !== skip && this.isEnemy(src, o) && o.alive) { const d = Math.hypot(o.x - x, o.y - y); if (d <= radius) this.damageTL(src, o, dmg * Math.max(minFrac, 1 - d / radius), kf, { x, y }); } }
+  private areaDamage(src: number, x: number, y: number, radius: number, dmg: number, kf: number, minFrac: number, skip = -1) { for (const o of this.players) if (o.id !== skip && this.isEnemy(src, o) && o.alive) { const d = dhypot(o.x - x, o.y - y); if (d <= radius) this.damageTL(src, o, dmg * Math.max(minFrac, 1 - d / radius), kf, { x, y }); } }
   private addRushSpeed(p: Warlock, dmg: number) { if (!p.rush) return; const add = (7 + 1.5 * p.rush.level) * dmg; p.rush.speedBonus += p.rush.speedBonus < 250 ? add : add / 8; }
 
   private kill(p: Warlock) {
@@ -984,6 +986,18 @@ export class Sim {
     this.events.push({ t: 'effect', name: 'respawn', x: p.x, y: p.y, modelPath: 'Abilities\\Spells\\Human\\ReviveHuman\\ReviveHuman.mdl' });
   }
 
+  // Mirrors the map's EVENT_PLAYER_LEAVE handler: the warlock is removed
+  // outright (no death, no bounty) and the player is greyed out.
+  private leave(p: Warlock) {
+    p.left = true;
+    p.alive = false;
+    p.ready = true;
+    p.respawn = 0;
+    p.order = { type: 'idle' }; p.cast = null; p.thrust = null; p.link = null; p.frozen = null; p.timeshift = null; p.rush = null;
+    for (const o of this.players) if (o.link?.target === p.id) o.link = null;
+    this.events.push({ t: 'left', pid: p.id });
+  }
+
   private livingTeamsOrPlayers() { return new Set(this.players.filter((p) => p.alive).map((p) => this.rules.teams === '2teams' ? p.team : p.id)).size; }
   private checkWinCondition() {
     const alive = this.players.filter((p) => p.alive);
@@ -1012,7 +1026,7 @@ export class Sim {
   stateHash(): string {
     const data = {
       tick: this.tick, phase: this.phase, round: this.round, mb: this.arenaMB, tv: this.terrainVersion,
-      p: this.players.map((p) => [p.id, +p.x.toFixed(2), +p.y.toFixed(2), +p.vx.toFixed(3), +p.vy.toFixed(3), +p.hp.toFixed(3), +p.damagePoints.toFixed(3), p.alive, p.gold, p.stats.points, p.stats.kills, p.stats.deaths, Object.entries(p.spells).sort()]),
+      p: this.players.map((p) => [p.id, +p.x.toFixed(2), +p.y.toFixed(2), +p.vx.toFixed(3), +p.vy.toFixed(3), +p.hp.toFixed(3), +p.damagePoints.toFixed(3), p.alive, p.left, p.gold, p.stats.points, p.stats.kills, p.stats.deaths, Object.entries(p.spells).sort()]),
       pr: this.projectiles.map((p) => [p.id, p.kind, p.owner, +p.x.toFixed(2), +p.y.toFixed(2), +p.vx.toFixed(3), +p.vy.toFixed(3), +p.life.toFixed(2)]),
     };
     return JSON.stringify(data);
