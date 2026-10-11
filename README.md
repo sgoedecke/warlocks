@@ -1,5 +1,7 @@
 # Warlocks
 
+**Play it at https://sgoedecke.github.io/warlocks/**
+
 A browser remake of the Warcraft III custom map **Warlock 0.88b**. Warlocks fight on a platform surrounded by lava, and the platform shrinks over time. Spells do little damage; their real job is knockback. Push your enemies into the lava and stay out of it yourself. The last warlock standing wins the round, and between rounds you spend gold in the shops.
 
 The game rules come from the map's own script and object data, not from memory. Physics runs in 0.03s ticks like the original, and knockback scales with "damage points" the way the map does it. The arena is painted tile by tile and shrinks the same way. Spell numbers, shop prices, items, obstacle sets and announcer lines all match 0.88b.
@@ -10,6 +12,8 @@ npm run dev      # Vite dev server
 npm run build    # tsc --noEmit + production build
 npx tsx scripts/simtest.ts
 ```
+
+Every push to `master` builds the site and deploys it to GitHub Pages (`.github/workflows/pages.yml`).
 
 ## Gameplay fidelity highlights
 
