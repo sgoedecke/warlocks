@@ -9,66 +9,45 @@ import { GameRenderer } from './render/renderer';
 import { loadRealIcons, makeCursor } from './render/textures';
 import { Hud, playerName, SHOP_ICON_PATHS } from './ui/hud';
 import { SoundSystem, type Sfx } from './audio';
-import { addFiles, assetStatus, initAssets, onAssetStatus, removeArchive, type ArchiveRole, type AssetStatus } from './assets/loader';
+import { initAssets, onAssetStatus } from './assets/loader';
 import { clearMdxCache } from './render/mdx';
 import { BUFFER_TICKS, HASH_EVERY, hashString, type Lockstep } from './net/lockstep';
 import { workerInterval } from './net/timer';
 import { MAX_PLAYERS, NetSession, normalizeCode, PUBLIC_ROOMS, type LobbyState, type NetRules, type StartInfo } from './net/session';
 
-/** Dev-only overrides of the graphics preset, for benchmarking. */
-interface GraphicsOverrides {
+/** What the menu remembers between visits. */
+interface Settings {
+  name: string;
+  bots: number;
+}
+
+/** Dev-only overrides, for benchmarking. */
+interface DevOptions {
   frameCap?: number;
   pixelRatio?: number;
+  antialias?: boolean;
+  lockCamera?: boolean;
 }
 
-interface Settings extends GraphicsOverrides {
-  name: string;
-  color: number;
-  bots: number;
-  difficulty: Difficulty;
-  rounds: number;
-  mode: 'round' | 'deathmatch';
-  pointLimit: number;
-  teams: 'ffa' | '2teams';
-  arenaShape: 'square' | 'circle';
-  startingGold: number;
-  quickCast: boolean;
-  lockCamera: boolean;
-  volume: number;
-  graphics: GraphicsPreset;
-  /** MSAA costs roughly a quarter of the GPU time per frame; classic WC3 had none either. */
-  antialias: boolean;
-}
-
-type GraphicsPreset = 'saver' | 'balanced' | 'high';
-/**
- * Frame cap (0 = every display refresh) and the highest device pixel ratio the 3D view renders at.
- * GPU cost scales with pixels drawn, so these two settings set most of the game's power draw.
- */
-const GRAPHICS: Record<GraphicsPreset, { label: string; frameCap: number; pixelRatio: number }> = {
-  saver: { label: 'Battery saver (30 fps)', frameCap: 30, pixelRatio: 1 },
-  balanced: { label: 'Balanced (60 fps)', frameCap: 60, pixelRatio: 1.5 },
-  high: { label: 'High (display rate)', frameCap: 0, pixelRatio: 2 },
-};
-
-const DEFAULTS: Settings = {
-  name: 'Player', color: 0, bots: 5, difficulty: 'normal', rounds: 10, mode: 'round', pointLimit: 20, teams: 'ffa', arenaShape: 'square', startingGold: 10, quickCast: false, lockCamera: false, volume: 0.6,
-  graphics: 'balanced', antialias: true,
-};
+/** 60 fps at up to 1.5× device pixels: GPU cost scales with pixels drawn, so these set most of the power draw. */
+const FRAME_CAP = 60;
+const PIXEL_RATIO = 1.5;
+const VOLUME = 0.6;
+const DEFAULTS: Settings = { name: 'Player', bots: 3 };
+const RULES: NetRules = { mode: 'round', rounds: 10, pointLimit: 20, teams: 'ffa', arenaShape: 'square', startingGold: 10 };
+const DIFFICULTY: Difficulty = 'normal';
 
 function loadSettings(): Settings {
   try {
-    const s: Settings = { ...DEFAULTS, ...JSON.parse(localStorage.getItem('warlocks.settings') ?? '{}') };
-    if (!(s.graphics in GRAPHICS)) s.graphics = DEFAULTS.graphics;
-    return s;
+    const s = { ...DEFAULTS, ...JSON.parse(localStorage.getItem('warlocks.settings') ?? '{}') };
+    return { name: String(s.name).slice(0, 16) || DEFAULTS.name, bots: Math.max(0, Math.min(MAX_PLAYERS - 1, Number(s.bots) | 0)) };
   } catch {
     return { ...DEFAULTS };
   }
 }
 
 function saveSettings(s: Settings) {
-  const { frameCap: _f, pixelRatio: _p, ...persisted } = s;
-  localStorage.setItem('warlocks.settings', JSON.stringify(persisted));
+  localStorage.setItem('warlocks.settings', JSON.stringify({ name: s.name, bots: s.bots }));
 }
 
 const sound = new SoundSystem();
@@ -90,16 +69,11 @@ interface GameSetup {
   net?: { session: NetSession; lockstep: Lockstep };
 }
 
-function rulesFrom(s: Settings): NetRules {
-  return { mode: s.mode, rounds: s.rounds, pointLimit: s.pointLimit, teams: s.teams, arenaShape: s.arenaShape, startingGold: s.startingGold };
-}
-
-function singlePlayerSetup(settings: Settings): GameSetup {
-  const players: PlayerSetup[] = [{ name: settings.name || 'Player', color: settings.color, isBot: false }];
+function localSetup(name: string, bots: number, rules: Partial<SimRules> = RULES): GameSetup {
+  const players: PlayerSetup[] = [{ name, color: 0, isBot: false }];
   const names = [...BOT_NAMES].sort(() => Math.random() - 0.5);
-  const colors = PLAYER_COLORS.map((_, i) => i).filter((c) => c !== settings.color);
-  for (let i = 0; i < settings.bots; i++) players.push({ name: names[i], color: colors[i], isBot: true });
-  return { players, seed: (Math.random() * 2 ** 31) | 0, rules: rulesFrom(settings), difficulty: settings.difficulty, localId: 0 };
+  for (let i = 0; i < bots; i++) players.push({ name: names[i], color: i + 1, isBot: true });
+  return { players, seed: (Math.random() * 2 ** 31) | 0, rules, difficulty: DIFFICULTY, localId: 0 };
 }
 
 class Game {
@@ -125,14 +99,14 @@ class Game {
   private disposers: (() => void)[] = [];
   private frameCap: number;
 
-  constructor(private settings: Settings, private onExit: (again: boolean) => void, setup = singlePlayerSetup(settings)) {
+  constructor(setup: GameSetup, private onExit: (again: boolean) => void, dev: DevOptions = {}) {
     const { players, seed } = setup;
     this.localId = setup.localId;
     this.net = setup.net;
     this.sim = new Sim({ players, seed, rules: setup.rules });
     // Bots are deterministic, so in multiplayer every peer runs all of them rather than sending their orders.
     this.bots = this.sim.players.filter((p) => p.isBot).map((p) => new Bot(p.id, seed ^ (p.id * 7919), setup.difficulty));
-    this.lockCamera = settings.lockCamera;
+    this.lockCamera = dev.lockCamera ?? false;
 
     this.root = document.createElement('div');
     this.root.id = 'game';
@@ -141,9 +115,8 @@ class Game {
     this.root.appendChild(viewport);
     app.appendChild(this.root);
 
-    const gfx = GRAPHICS[settings.graphics];
-    this.frameCap = settings.frameCap ?? gfx.frameCap;
-    this.renderer = new GameRenderer(viewport, this.sim, this.localId, { pixelRatio: settings.pixelRatio ?? gfx.pixelRatio, antialias: settings.antialias });
+    this.frameCap = dev.frameCap ?? FRAME_CAP;
+    this.renderer = new GameRenderer(viewport, this.sim, this.localId, { pixelRatio: dev.pixelRatio ?? PIXEL_RATIO, antialias: dev.antialias ?? true });
     this.hud = new Hud(this.root, this.sim, this.localId, this.renderer, {
       onSpell: (id) => this.activateSpell(id),
       onBuy: (id) => {
@@ -165,17 +138,11 @@ class Game {
       onPause: () => this.setPaused(true),
       onResume: () => this.setPaused(false),
       onQuit: () => this.exit(false),
+      onControls: showControls,
       onPlayAgain: () => this.exit(true),
-    });
-    this.hud.bindVolume(() => sound.volume, (v) => {
-      sound.setVolume(v);
-      this.settings.volume = v;
-      saveSettings(this.settings);
     });
     this.bindInput();
     sound.startAmbient();
-    this.hud.message(`Welcome to <span style="color:#ffcc00">Warlocks</span>! Knock your enemies into the lava. Last warlock standing wins the round.`, 14);
-    this.hud.message(`Right-click to move. Press a spell hotkey then left-click to aim. <span style="color:#ffcc00">Space</span> centres the camera, <span style="color:#ffcc00">C</span> toggles camera lock.`, 14);
     if (this.net) this.bindNet();
     this.raf = requestAnimationFrame(this.frame);
   }
@@ -185,7 +152,6 @@ class Game {
     const btn = (act: string) => this.root.querySelector<HTMLElement>(`[data-act="${act}"]`);
     btn('again')!.textContent = 'Back to Lobby';
     for (const b of this.root.querySelectorAll<HTMLElement>('[data-act="quit"]')) b.textContent = 'Leave Game';
-    btn('resume')!.insertAdjacentHTML('beforebegin', '<div class="mp-note">Online game: the game keeps running while this menu is open.</div>');
     session.events = {
       onChat: (pid, text) => this.hud.message(`${playerName(this.sim.players[pid])}: ${escapeHtml(text)}`, 12),
       onClosed: (reason) => {
@@ -205,7 +171,6 @@ class Game {
     this.chatInput = document.createElement('input');
     this.chatInput.className = 'chat-input hidden';
     this.chatInput.maxLength = 120;
-    this.chatInput.placeholder = 'Say:';
     this.root.appendChild(this.chatInput);
     const closeChat = () => {
       this.chatInput!.value = '';
@@ -319,13 +284,6 @@ class Game {
       this.targeting = null;
       return;
     }
-    if (this.settings.quickCast && this.mouse.inside) {
-      const w = this.renderer.pick(this.mouse.x, this.mouse.y);
-      if (w) {
-        this.queue({ pid: this.localId, type: 'cast', spell: id, x: w.x, y: w.y });
-        return;
-      }
-    }
     this.targeting = id;
   }
 
@@ -387,7 +345,7 @@ class Game {
         return;
       }
       if (this.paused || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
-      if (k === 'C') {
+      if (k === 'L') {
         this.lockCamera = !this.lockCamera;
         this.hud.message(`Camera lock ${this.lockCamera ? 'enabled' : 'disabled'}.`, 3);
         return;
@@ -621,200 +579,101 @@ class Game {
 
 // ---------- main menu ----------
 
-const ROLE_LABEL: Record<ArchiveRole, string> = { map: 'Map', base: 'war3.mpq', expansion: 'War3x.mpq', patch: 'War3Patch.mpq' };
-
-function bindAssetPanel(menu: HTMLElement) {
-  const statusEl = menu.querySelector<HTMLElement>('[data-asset-status]')!;
-  const input = menu.querySelector<HTMLInputElement>('[data-asset-input]')!;
-  let busy = false;
-  const render = (st: AssetStatus) => {
-    const byRole = new Map(st.archives.map((a) => [a.role, a.name]));
-    const row = (role: ArchiveRole) => {
-      const name = byRole.get(role);
-      return `<div class="asset-row ${name ? 'ok' : ''}"><span>${ROLE_LABEL[role]}</span><span>${name ? `${escapeHtml(name)} <a href="#" data-remove="${role}" title="Forget">✕</a>` : '<i>not loaded</i>'}</span></div>`;
-    };
-    statusEl.innerHTML = (['map', 'base', 'expansion', 'patch'] as ArchiveRole[]).map(row).join('')
-      + (st.hasMap && !st.hasWarlockModel ? '<div class="asset-warn">That map has no BloodelfWizard model; is it Warlocks?</div>' : '')
-      + (st.error ? `<div class="asset-warn">${escapeHtml(st.error)}</div>` : '')
-      + (busy ? '<div class="asset-busy">Reading…</div>' : '');
-    statusEl.querySelectorAll<HTMLElement>('[data-remove]').forEach((a) => a.addEventListener('click', (e) => {
-      e.preventDefault();
-      void removeArchive(a.dataset.remove as ArchiveRole);
-    }));
-  };
-  const off = onAssetStatus(render);
-  const add = async (files: Iterable<File>) => {
-    busy = true;
-    render(assetStatus());
-    try {
-      await addFiles(files);
-    } finally {
-      busy = false;
-      render(assetStatus());
-    }
-  };
-  input.addEventListener('change', () => input.files && void add([...input.files]));
-  menu.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    menu.classList.add('dropping');
-  });
-  menu.addEventListener('dragleave', () => menu.classList.remove('dropping'));
-  menu.addEventListener('drop', (e) => {
-    e.preventDefault();
-    menu.classList.remove('dropping');
-    if (e.dataTransfer?.files.length) void add([...e.dataTransfer.files]);
-  });
-  new MutationObserver((_, obs) => {
-    if (!menu.isConnected) {
-      off();
-      obs.disconnect();
-    }
-  }).observe(app, { childList: true });
-}
-
 function escapeHtml(t: string) {
   return t.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
+}
+
+const CONTROLS: [string, string][] = [
+  ['Right-click', 'Move'],
+  ['Hotkey, then left-click', 'Cast'],
+  ['S', 'Stop'],
+  ['Esc', 'Cancel'],
+  ['Arrows / screen edge', 'Scroll'],
+  ['Wheel', 'Zoom'],
+  ['Space', 'Centre on hero'],
+  ['L', 'Camera lock'],
+  ['Tab', 'Scores'],
+  ['Enter', 'Chat'],
+  ['F10', 'Menu'],
+  [[...new Set(ALL_SPELLS.map((id) => SPELLS[id].hotkey))].join(' '), 'Spells'],
+];
+
+/** The key bindings, in a modal over whatever is showing. */
+function showControls() {
+  const el = document.createElement('div');
+  el.className = 'modal-backdrop';
+  el.innerHTML = `<div class="modal frame controls">
+    <table>${CONTROLS.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('')}</table>
+    <div class="buttons"><button class="wc-btn big" data-close>Close</button></div>
+  </div>`;
+  const close = () => {
+    el.remove();
+    window.removeEventListener('keydown', onKey, true);
+  };
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key !== 'Escape') return;
+    e.stopPropagation();
+    close();
+  };
+  window.addEventListener('keydown', onKey, true);
+  el.addEventListener('click', (e) => {
+    if (e.target === el || (e.target as HTMLElement).closest('[data-close]')) close();
+  });
+  document.body.appendChild(el);
 }
 
 function showMenu(notice = '') {
   const s = loadSettings();
   const menu = document.createElement('div');
   menu.id = 'menu';
-  const opt = (vals: (string | number)[], cur: string | number, labels?: string[]) =>
-    vals.map((v, i) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${labels ? labels[i] : v}</option>`).join('');
   menu.innerHTML = `
     <div class="title">WARLOCKS</div>
-    <div class="subtitle">A tribute to the Warcraft III custom map</div>
-    <div class="menu-cols">
-    <div class="panel frame">
-      <div class="form-row">Name <input data-k="name" maxlength="16" value=""></div>
-      <div class="form-row">Colour <div class="color-swatches">${PLAYER_COLORS.map((c, i) => `<div data-c="${i}" title="${c.name}" style="background:${c.css}" class="${i === s.color ? 'sel' : ''}"></div>`).join('')}</div></div>
-      <div class="form-row">Opponents <select data-k="bots">${opt([1, 2, 3, 4, 5, 6, 7], s.bots)}</select></div>
-      <div class="form-row">Difficulty <select data-k="difficulty">${opt(['easy', 'normal', 'hard'], s.difficulty, ['Easy', 'Normal', 'Insane'])}</select></div>
-      <div class="form-row">Mode <select data-k="mode">${opt(['round', 'deathmatch'], s.mode, ['Round', 'Deathmatch'])}</select></div>
-      <div class="form-row">Rounds <select data-k="rounds">${opt([3, 5, 10, 15, 20], s.rounds)}</select></div>
-      <div class="form-row">Point limit <select data-k="pointLimit">${opt([10, 15, 20, 30, 50], s.pointLimit)}</select></div>
-      <div class="form-row">Teams <select data-k="teams">${opt(['ffa', '2teams'], s.teams, ['FFA', '2 Teams'])}</select></div>
-      <div class="form-row">Arena <select data-k="arenaShape">${opt(['square', 'circle'], s.arenaShape, ['Square', 'Circle'])}</select></div>
-      <div class="form-row">Starting gold <select data-k="startingGold">${opt([10, 20, 50, 100], s.startingGold)}</select></div>
-      <div class="form-row">Quick cast <input type="checkbox" data-k="quickCast" ${s.quickCast ? 'checked' : ''}></div>
-      <div class="form-row">Lock camera to hero <input type="checkbox" data-k="lockCamera" ${s.lockCamera ? 'checked' : ''}></div>
-      <div class="form-row">Graphics <select data-k="graphics">${opt(Object.keys(GRAPHICS), s.graphics, Object.values(GRAPHICS).map((g) => g.label))}</select></div>
-      <div class="form-row">Anti-aliasing <input type="checkbox" data-k="antialias" ${s.antialias ? 'checked' : ''}></div>
-      <div class="form-row" style="justify-content:center;margin-top:18px"><button class="wc-btn big" data-start>Start Game</button></div>
-    </div>
-    <div class="side-col">
-    <div class="panel frame mp-panel">
-      <div class="assets-title">Online</div>
-      <div class="mp-quick"><button class="wc-btn big" data-online>Play Online</button></div>
-      <div class="mp-hint">Joins the public lobby, or opens one if nobody is waiting.</div>
-      <div class="mp-sub">Private game with friends</div>
-      <div class="mp-row">
-        <button class="wc-btn" data-host>Host Game</button>
+    <div class="panel frame main-menu">
+      <input data-name maxlength="16" spellcheck="false" autocomplete="off">
+      <button class="wc-btn big" data-quick>Quick Play</button>
+      <button class="wc-btn big" data-host>Host Game</button>
+      <div class="join-row">
         <input data-code placeholder="Code" maxlength="12" spellcheck="false" autocomplete="off">
         <button class="wc-btn" data-join>Join</button>
       </div>
-      <div class="mp-hint">Hosting uses the settings on the left.</div>
-      <div class="mp-notice ${notice ? '' : 'hidden'}" data-notice>${escapeHtml(notice)}</div>
-    </div>
-    <div class="panel frame assets-panel">
-      <div class="assets-title">Original assets</div>
-      <div data-asset-status></div>
-      <label class="wc-btn">Add files…<input type="file" multiple accept=".w3m,.w3x,.mpq" data-asset-input hidden></label>
-      <div class="assets-note">
-        Drop <b>Warlock 0.88b</b> (.w3m) here to use its warlock model, spell effects and announcer voice.
-        For the Blizzard art the map borrows (missiles, doodads, terrain tiles, icons), also add
-        <b>war3.mpq</b>, <b>War3x.mpq</b> and <b>War3Patch.mpq</b> from a classic (1.26 or earlier) install.
-        Anything missing is drawn procedurally. Files never leave your browser.
-      </div>
-    </div>
-    </div>
-    </div>
-    <div class="help">
-      <b>Right-click</b> move &nbsp;·&nbsp; <b>Hotkey + Left-click</b> cast &nbsp;·&nbsp; <b>S</b> stop &nbsp;·&nbsp; <b>Esc / Right-click</b> cancel targeting<br>
-      <b>Arrows / screen edge</b> scroll &nbsp;·&nbsp; <b>Space</b> centre on hero &nbsp;·&nbsp; <b>C</b> camera lock &nbsp;·&nbsp; <b>Wheel</b> zoom &nbsp;·&nbsp; <b>Tab</b> scores &nbsp;·&nbsp; <b>F10</b> menu<br>
-      Spells: ${WARLOCK_CARD.map((id) => `${SPELLS[id].name} <b>${SPELLS[id].hotkey}</b>`).join(' · ')}
+      <button class="wc-btn big" data-controls>Controls</button>
+      <div class="mp-notice ${notice ? '' : 'hidden'}">${escapeHtml(notice)}</div>
     </div>`;
   app.appendChild(menu);
-  (menu.querySelector('[data-k="name"]') as HTMLInputElement).value = s.name;
-  bindAssetPanel(menu);
-  menu.querySelectorAll<HTMLElement>('.color-swatches div').forEach((d) =>
-    d.addEventListener('click', () => {
-      menu.querySelectorAll('.color-swatches div').forEach((x) => x.classList.remove('sel'));
-      d.classList.add('sel');
-      s.color = Number(d.dataset.c);
-    }));
-  const collect = () => {
-    const get = (k: string) => menu.querySelector(`[data-k="${k}"]`) as HTMLInputElement;
-    s.name = get('name').value.trim() || 'Player';
-    s.bots = Number(get('bots').value);
-    s.difficulty = get('difficulty').value as Difficulty;
-    s.mode = get('mode').value as Settings['mode'];
-    s.rounds = Number(get('rounds').value);
-    s.pointLimit = Number(get('pointLimit').value);
-    s.teams = get('teams').value as Settings['teams'];
-    s.arenaShape = get('arenaShape').value as Settings['arenaShape'];
-    s.startingGold = Number(get('startingGold').value);
-    s.quickCast = get('quickCast').checked;
-    s.lockCamera = get('lockCamera').checked;
-    s.graphics = get('graphics').value as GraphicsPreset;
-    s.antialias = get('antialias').checked;
+  const q = <T extends HTMLElement>(sel: string) => menu.querySelector<T>(sel)!;
+  const nameInput = q<HTMLInputElement>('[data-name]');
+  const codeInput = q<HTMLInputElement>('[data-code]');
+  nameInput.value = s.name;
+  const leave = () => {
+    s.name = nameInput.value.trim() || DEFAULTS.name;
     saveSettings(s);
     sound.ensure();
-    sound.setVolume(s.volume);
+    sound.setVolume(VOLUME);
     sound.play('click');
     menu.remove();
+    return { name: s.name, color: 0 };
   };
-  const start = () => {
-    collect();
-    startGame(s);
-  };
-  const codeInput = menu.querySelector<HTMLInputElement>('[data-code]')!;
   const join = () => {
     const code = normalizeCode(codeInput.value);
     if (code.length < 4) {
       codeInput.focus();
       return;
     }
-    collect();
-    showLobby(NetSession.join(code, { name: s.name, color: s.color }));
+    showLobby(NetSession.join(code, leave()));
   };
-  menu.querySelector('[data-start]')!.addEventListener('click', start);
-  menu.querySelector('[data-host]')!.addEventListener('click', () => {
-    collect();
-    showLobby(NetSession.host({ name: s.name, color: s.color }, rulesFrom(s), s.difficulty, Math.min(s.bots, MAX_PLAYERS - 1)));
-  });
-  menu.querySelector('[data-join]')!.addEventListener('click', join);
-  menu.querySelector('[data-online]')!.addEventListener('click', () => {
-    collect();
-    quickPlay(1);
-  });
-  menu.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter') return;
-    if (e.target === codeInput) join();
-    else start();
-  });
+  q('[data-quick]').addEventListener('click', () => quickPlay(1, leave()));
+  q('[data-host]').addEventListener('click', () => showLobby(NetSession.host(leave(), RULES, DIFFICULTY, s.bots)));
+  q('[data-join]').addEventListener('click', join);
+  q('[data-controls]').addEventListener('click', showControls);
+  codeInput.addEventListener('keydown', (e) => e.key === 'Enter' && join());
 }
 
-const MODE_LABEL = { round: 'Rounds', deathmatch: 'Deathmatch' };
-const DIFFICULTY_LABEL: Record<Difficulty, string> = { easy: 'Easy', normal: 'Normal', hard: 'Insane' };
-
-function rulesSummary(r: NetRules) {
-  return [
-    r.mode === 'round' ? `${r.rounds} rounds` : `${MODE_LABEL[r.mode]} to ${r.pointLimit} points`,
-    r.teams === 'ffa' ? 'free for all' : '2 teams',
-    `${r.arenaShape} arena`,
-    `${r.startingGold} starting gold`,
-  ].join(' · ');
+/** Quick Play: try public room `n`, moving to the next one if its game has started. */
+function quickPlay(n: number, me: { name: string; color: number }) {
+  showLobby(NetSession.public(n, me, RULES, DIFFICULTY));
 }
 
-/** Play Online: try public room `n`, moving to the next one if its game has started. */
-function quickPlay(n: number) {
-  const s = loadSettings();
-  showLobby(NetSession.public(n, { name: s.name, color: s.color }, rulesFrom(s), s.difficulty));
-}
-
-/** The multiplayer lobby, for host and clients alike. */
+/** The lobby, for host and clients alike. A host alone with computer players plays offline. */
 function showLobby(session: NetSession) {
   const el = document.createElement('div');
   el.id = 'menu';
@@ -824,48 +683,39 @@ function showLobby(session: NetSession) {
   const hostView = session.isHost;
   el.innerHTML = `
     <div class="title">WARLOCKS</div>
-    <div class="subtitle">${session.isPublic ? 'Public game' : session.isHost ? 'Hosting an online game' : 'Joining an online game'}</div>
     <div class="panel frame lobby-panel">
-      ${session.isPublic
-        ? `<div class="lobby-code">Public lobby <b>${session.publicRoom}</b></div>`
-        : `<div class="lobby-code">Room code <b>${session.code}</b> <button class="wc-btn" data-copy>Copy invite link</button></div>`}
+      ${session.isPublic ? '' : `<div class="lobby-code"><b>${session.code}</b> <button class="wc-btn" data-copy>Copy link</button></div>`}
       <div class="lobby-status" data-status></div>
       <table class="lobby-players" data-players></table>
-      ${session.isHost ? `<div class="form-row">Computer players <span class="stepper"><button class="wc-btn" data-bots="-1">−</button><span data-botcount></span><button class="wc-btn" data-bots="1">+</button></span></div>
-      <div class="form-row">Difficulty <select data-difficulty>${(['easy', 'normal', 'hard'] as Difficulty[]).map((d) => `<option value="${d}">${DIFFICULTY_LABEL[d]}</option>`).join('')}</select></div>` : ''}
-      <div class="lobby-rules" data-rules></div>
+      ${hostView ? '<button class="wc-btn small add-bot" data-addbot>+ Computer</button>' : ''}
       <div class="buttons">
         <button class="wc-btn big" data-leave>Leave</button>
-        ${session.isHost ? '<button class="wc-btn big" data-startmp>Start Game</button>' : ''}
+        ${hostView ? '<button class="wc-btn big" data-startmp>Start</button>' : ''}
       </div>
-      <div class="assets-note">${session.isPublic
-        ? 'Anyone who clicks Play Online lands here until the game starts. The host can fill empty seats with computer players.'
-        : 'Players connect to each other directly. The room code is all a friend needs: share it or the invite link.'}</div>
     </div>`;
   app.appendChild(el);
   const q = <T extends HTMLElement>(sel: string) => el.querySelector(sel) as T;
+  const status = q<HTMLElement>('[data-status]');
   const render = (l: LobbyState | null) => {
-    const status = q<HTMLElement>('[data-status]');
-    if (!l) {
-      status.textContent = session.isPublic ? 'Looking for an open game…' : 'Connecting to the host…';
-      return;
-    }
-    const humans = l.slots.filter((x) => x.peer).length;
-    status.textContent = session.isHost
-      ? (humans > 1 ? `${humans} players connected.` : session.isPublic ? 'No open game found, so you are hosting. Waiting for players…' : 'Waiting for players to join…')
-      : 'Connected. Waiting for the host to start…';
-    q<HTMLElement>('[data-players]').innerHTML = l.slots.map((x) => {
-      const tags = [x.peer === session.hostId ? 'host' : '', x.peer === session.selfId ? 'you' : '', x.peer ? '' : DIFFICULTY_LABEL[l.difficulty].toLowerCase()].filter(Boolean).join(', ');
-      return `<tr><td><span class="swatch" style="background:${PLAYER_COLORS[x.color].css}"></span></td><td>${escapeHtml(x.name)}</td><td class="tags">${tags}</td></tr>`;
+    status.textContent = l ? '' : session.isPublic ? 'Searching…' : 'Connecting…';
+    status.classList.toggle('hidden', !!l);
+    if (!l) return;
+    const host = hostView && session.isHost;
+    q<HTMLElement>('[data-players]').innerHTML = l.slots.map((x, i) => {
+      const remove = host && !x.peer ? `<button class="wc-btn small" data-rmbot="${i}">✕</button>` : '';
+      return `<tr class="${x.peer === session.selfId ? 'me' : ''}"><td><span class="swatch" style="background:${PLAYER_COLORS[x.color].css}"></span></td><td>${escapeHtml(x.name)}</td><td>${remove}</td></tr>`;
     }).join('');
-    q<HTMLElement>('[data-rules]').textContent = rulesSummary(l.rules);
-    if (hostView && session.isHost) {
-      q<HTMLElement>('[data-botcount]').textContent = String(session.botCount);
-      q<HTMLSelectElement>('[data-difficulty]').value = l.difficulty;
+    if (host) {
+      q<HTMLButtonElement>('[data-addbot]').disabled = l.slots.length >= MAX_PLAYERS;
       q<HTMLButtonElement>('[data-startmp]').disabled = l.slots.length < 2;
     }
   };
   const close = () => el.remove();
+  const remember = () => {
+    const s = loadSettings();
+    s.bots = session.botCount;
+    saveSettings(s);
+  };
   session.events = {
     onLobby: render,
     onStart: (info, ls) => {
@@ -878,14 +728,14 @@ function showLobby(session: NetSession) {
     },
     onClosed: (reason, retry) => {
       close();
-      if (retry && session.isPublic && session.publicRoom < PUBLIC_ROOMS) quickPlay(session.publicRoom + 1);
+      if (retry && session.isPublic && session.publicRoom < PUBLIC_ROOMS) quickPlay(session.publicRoom + 1, { name: loadSettings().name, color: 0 });
       else showMenu(reason);
     },
   };
   render(session.lobby);
   if (import.meta.env.DEV) (window as unknown as { __session: NetSession }).__session = session;
   el.querySelector('[data-copy]')?.addEventListener('click', () => {
-    void navigator.clipboard?.writeText(invite).then(() => (q('[data-copy]').textContent = 'Copied!'));
+    void navigator.clipboard?.writeText(invite).then(() => (q('[data-copy]').textContent = 'Copied'));
   });
   q('[data-leave]').addEventListener('click', () => {
     sound.play('click');
@@ -894,24 +744,36 @@ function showLobby(session: NetSession) {
     close();
     showMenu();
   });
-  if (session.isHost) {
-    el.querySelectorAll<HTMLElement>('[data-bots]').forEach((b) => b.addEventListener('click', () => {
-      session.setBots(session.botCount + Number(b.dataset.bots));
-    }));
-    q<HTMLSelectElement>('[data-difficulty]').addEventListener('change', (e) => session.setDifficulty((e.target as HTMLSelectElement).value as Difficulty));
-    q('[data-startmp]').addEventListener('click', () => {
-      sound.ensure();
-      sound.play('click');
+  if (!hostView) return;
+  q('[data-addbot]').addEventListener('click', () => session.setBots(session.botCount + 1));
+  q<HTMLElement>('[data-players]').addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).closest('[data-rmbot]')) session.setBots(session.botCount - 1);
+  });
+  q('[data-startmp]').addEventListener('click', () => {
+    sound.ensure();
+    sound.play('click');
+    remember();
+    const humans = session.lobby?.slots.filter((x) => x.peer).length ?? 0;
+    if (humans > 1) {
       session.startGame();
-    });
-  }
+      return;
+    }
+    // Nobody else here: play offline, so the game can pause and doesn't depend on the network.
+    const bots = session.botCount;
+    session.events.onClosed = undefined;
+    session.close();
+    close();
+    startGame(loadSettings().name, bots);
+  });
 }
 
 function startNetGame(session: NetSession, info: StartInfo, lockstep: Lockstep) {
-  const s = loadSettings();
   sound.ensure();
-  sound.setVolume(s.volume);
-  const game = new Game(s, (again) => {
+  sound.setVolume(VOLUME);
+  const game = new Game({
+    players: info.players, seed: info.seed, rules: info.rules, difficulty: info.difficulty,
+    localId: lockstep.localId, net: { session, lockstep },
+  }, (again) => {
     if (again) {
       if (session.isHost) session.reopenLobby();
       else session.leaveGame();
@@ -921,18 +783,17 @@ function startNetGame(session: NetSession, info: StartInfo, lockstep: Lockstep) 
       session.close();
       showMenu();
     }
-  }, {
-    players: info.players, seed: info.seed, rules: info.rules, difficulty: info.difficulty,
-    localId: lockstep.localId, net: { session, lockstep },
   });
   if (import.meta.env.DEV) (window as unknown as { __game: Game }).__game = game;
 }
 
-function startGame(s: Settings) {
-  const game = new Game(s, (again) => {
-    if (again) startGame(loadSettings());
+function startGame(name: string, bots: number, rules?: Partial<SimRules>, dev?: DevOptions) {
+  sound.ensure();
+  sound.setVolume(VOLUME);
+  const game = new Game(localSetup(name, bots, rules), (again) => {
+    if (again) startGame(name, bots, rules, dev);
     else showMenu();
-  });
+  }, dev);
   if (import.meta.env.DEV) (window as unknown as { __game: Game }).__game = game;
   return game;
 }
@@ -950,26 +811,21 @@ async function boot() {
   if (joinCode) {
     const name = new URLSearchParams(location.search).get('name');
     history.replaceState(null, '', location.pathname);
-    const s = loadSettings();
-    if (import.meta.env.DEV && name) s.name = name;
-    showLobby(NetSession.join(joinCode, { name: s.name, color: s.color }));
+    showLobby(NetSession.join(joinCode, { name: (import.meta.env.DEV && name) || loadSettings().name, color: 0 }));
   } else if (import.meta.env.DEV && new URLSearchParams(location.search).has('public')) {
-    const s = loadSettings();
-    const name = new URLSearchParams(location.search).get('name');
-    if (name) saveSettings({ ...s, name });
-    quickPlay(Number(new URLSearchParams(location.search).get('public')) || 1);
-  } else if (import.meta.env.DEV && new URLSearchParams(location.search).has('host')) {
-    const s = loadSettings();
     const p = new URLSearchParams(location.search);
-    if (p.has('name')) s.name = p.get('name')!;
-    showLobby(NetSession.host({ name: s.name, color: s.color }, rulesFrom(s), s.difficulty, Number(p.get('bots') ?? 0)));
+    quickPlay(Number(p.get('public')) || 1, { name: p.get('name') ?? loadSettings().name, color: 0 });
+  } else if (import.meta.env.DEV && new URLSearchParams(location.search).has('host')) {
+    const p = new URLSearchParams(location.search);
+    showLobby(NetSession.host({ name: p.get('name') ?? loadSettings().name, color: 0 }, RULES, DIFFICULTY, Number(p.get('bots') ?? 0)));
   } else if (import.meta.env.DEV && new URLSearchParams(location.search).has('autostart')) {
     const p = new URLSearchParams(location.search);
-    const s = { ...loadSettings(), bots: Number(p.get('bots') ?? 5), difficulty: 'hard' as Difficulty, rounds: 1, mode: 'round' as const, startingGold: 120, lockCamera: true, volume: 0, arenaShape: (p.get('arena') ?? 'square') as Settings['arenaShape'] };
-    if (p.has('fps')) s.frameCap = Number(p.get('fps'));
-    if (p.has('res')) s.pixelRatio = Number(p.get('res'));
-    if (p.has('aa')) s.antialias = p.get('aa') === '1';
-    const game = startGame(s);
+    const dev: DevOptions = { lockCamera: true };
+    if (p.has('fps')) dev.frameCap = Number(p.get('fps'));
+    if (p.has('res')) dev.pixelRatio = Number(p.get('res'));
+    if (p.has('aa')) dev.antialias = p.get('aa') === '1';
+    const rules = { ...RULES, rounds: 1, startingGold: 120, arenaShape: (p.get('arena') ?? 'square') as SimRules['arenaShape'] };
+    const game = startGame('Player', Number(p.get('bots') ?? 5), rules, dev);
     const internals = game as unknown as { pending: Command[]; sim: Sim };
     if (p.get('phase') === 'fight' || p.get('phase') === 'shrink') {
       setTimeout(() => {

@@ -56,20 +56,25 @@ The map's models borrow all of their textures from the base game. `src/render/op
 | --- | --- |
 | Right-click | Move / cancel targeting |
 | Hotkey, then left-click | Cast targeted spell |
-| `G F D E R T Y C` | WC3 command-card spell hotkeys for the currently learned spell in each slot |
+| `D E R T Y F G C` | WC3 command-card spell hotkeys for the currently learned spell in each slot |
 | `S` | Stop |
 | Arrow keys / screen edge | Pan camera |
 | Mouse wheel | Zoom |
 | `Space` / `F1` | Centre camera on hero |
+| `L` | Lock camera to hero |
 | `Tab` | Multiboard |
 | `F10` / `Esc` | Menu |
 | `Enter` | Chat (online games) |
 
+The same list is under **Controls** on the main menu and in the game menu.
+
 ## Online multiplayer
 
-**Play Online** on the main menu joins the public lobby. If nobody is waiting there, you become its host, using the settings on the left. Whoever hosts can fill empty seats with computer players and start the game when ready. Once a game starts, newcomers go to the next public lobby, so a new one is always open.
+**Quick Play** on the main menu joins the public lobby. If nobody is waiting there, you become its host. Whoever hosts can add computer players and start the game when ready. Once a game starts, newcomers go to the next public lobby, so a new one is always open.
 
-For a private game, click **Host Game**. The lobby shows a room code and a **Copy invite link** button (`?join=CODE`). Friends enter the code under **Join** or open the link. Up to 10 players can take part, humans and computers combined.
+**Host Game** opens a private lobby with a room code and a **Copy link** button (`?join=CODE`). Friends enter the code under **Join** or open the link. Up to 10 players can take part, humans and computers combined. A host who starts with only computer players plays offline, so the game can pause.
+
+Games are always 10 rounds, free for all, on the square arena with 10 starting gold and Normal computer players. The sim still supports the map's other modes (deathmatch, teams, circular arena), but the menu doesn't offer them.
 
 How it works:
 
@@ -84,15 +89,7 @@ How it works:
 
 ## Graphics and power use
 
-The menu's **Graphics** setting picks a frame cap and the maximum render resolution (device pixel ratio):
-
-| Preset | Frame cap | Resolution |
-| --- | --- | --- |
-| Battery saver | 30 fps | 1× (soft on Retina) |
-| Balanced (default) | 60 fps | 1.5× |
-| High | display refresh rate | 2× (native Retina) |
-
-**Anti-aliasing** (MSAA) is a separate toggle. Turning it off saves about a quarter of the GPU time but leaves jagged model edges; classic WC3 had none either. Other battery-related behaviour:
+The game is capped at 60 fps and renders at up to 1.5× device pixels, with MSAA. Other battery-related behaviour:
 
 - The game drops to 20 fps when the window is unfocused and to 10 fps while paused.
 - Between capped frames it sleeps on a timer, so Chrome stops waking on every vsync.

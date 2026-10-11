@@ -64,7 +64,7 @@ export interface SessionEvents {
 /**
  * A multiplayer session: a Trystero room plus the lobby and lockstep protocol on top of it.
  *
- * Private rooms have a random code and a fixed host. Public rooms ("Play Online") are numbered and
+ * Private rooms have a random code and a fixed host. Public rooms ("Quick Play") are numbered and
  * self-organising: a newcomer joins the open lobby if there is one, moves on to the next room if the
  * game there has started, and otherwise hosts. If two lobbies form in one room (two people arrived
  * together), the host with the smaller peer id wins and the other host and its players move over.
@@ -153,12 +153,6 @@ export class NetSession {
     if (!this.isHost || this.inGame || !this.lobby) return;
     this.bots = Math.max(0, n);
     this.rebuildLobby(this.lobby.slots.filter((s) => s.peer));
-  }
-
-  setDifficulty(d: Difficulty) {
-    if (!this.isHost || !this.lobby) return;
-    this.lobby.difficulty = d;
-    this.broadcastLobby();
   }
 
   get botCount() {

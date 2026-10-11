@@ -15,6 +15,7 @@ export interface HudCallbacks {
   onPause: () => void;
   onResume: () => void;
   onQuit: () => void;
+  onControls: () => void;
   onPlayAgain: () => void;
 }
 
@@ -124,8 +125,8 @@ export class Hud {
     this.root.innerHTML = `
       <div class="topbar">
         <div class="top-left">
-          <button class="wc-btn" data-act="menu">Menu (F10)</button>
-          <button class="wc-btn" data-act="scores">Scores (Tab)</button>
+          <button class="wc-btn" data-act="menu">Menu</button>
+          <button class="wc-btn" data-act="scores">Scores</button>
         </div>
         <div class="top-center frame"><div class="clock">0:00</div><div class="round">Round 1</div></div>
         <div class="resources frame">
@@ -153,7 +154,6 @@ export class Hud {
       </div>
       <div class="shop frame hidden">
         <h2 data-el="shopTitle">Merchant</h2>
-        <div class="sub">Click to buy. Hover for details.</div>
         <div class="shop-grid"></div>
         <div class="shop-footer">
           <div class="gold"><img src="${this.gold}"><span data-el="shopGold">0</span> gold</div>
@@ -162,10 +162,9 @@ export class Hud {
         </div>
       </div>
       <div class="modal frame pause hidden">
-        <h2>Game Menu</h2>
-        <div class="form-row">Volume <input type="range" min="0" max="1" step="0.05" data-el="volume"></div>
         <div class="buttons">
           <button class="wc-btn big" data-act="resume">Return to Game</button>
+          <button class="wc-btn big" data-act="controls">Controls</button>
           <button class="wc-btn big" data-act="quit">Quit to Main Menu</button>
         </div>
       </div>
@@ -208,6 +207,7 @@ export class Hud {
       else if (act === 'ready') cb.onReady();
       else if (act === 'resume') cb.onResume();
       else if (act === 'quit') cb.onQuit();
+      else if (act === 'controls') cb.onControls();
       else if (act === 'again') cb.onPlayAgain();
     });
     q('.mb-title').addEventListener('click', () => this.toggleScores());
@@ -222,12 +222,6 @@ export class Hud {
 
   toggleScores() {
     this.els.mb.classList.toggle('collapsed');
-  }
-
-  bindVolume(get: () => number, set: (v: number) => void) {
-    const el = this.els.volume as HTMLInputElement;
-    el.value = String(get());
-    el.addEventListener('input', () => set(parseFloat(el.value)));
   }
 
   private onResize = () => this.resize();
