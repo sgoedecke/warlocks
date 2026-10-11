@@ -20,10 +20,13 @@ export interface ParticleSpec {
 const VERT = /* glsl */ `
 attribute float aSize;
 attribute vec4 aColor;
+attribute float aFrame;
 varying vec4 vColor;
+varying float vFrame;
 uniform float uScale;
 void main() {
   vColor = aColor;
+  vFrame = aFrame;
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   gl_PointSize = aSize * uScale / max(1.0, -mv.z);
   gl_Position = projectionMatrix * mv;
@@ -31,9 +34,13 @@ void main() {
 
 const FRAG = /* glsl */ `
 uniform sampler2D uTex;
+uniform float uGrid;
 varying vec4 vColor;
+varying float vFrame;
 void main() {
-  vec4 t = texture2D(uTex, gl_PointCoord);
+  vec2 cell = vec2(mod(vFrame, uGrid), floor(vFrame / uGrid));
+  vec2 uv = (cell + gl_PointCoord) / uGrid;
+  vec4 t = texture2D(uTex, vec2(uv.x, 1.0 - uv.y));
   gl_FragColor = vec4(vColor.rgb * t.rgb, vColor.a * t.a);
   if (gl_FragColor.a < 0.003) discard;
 }`;
@@ -55,13 +62,20 @@ export class ParticleSystem {
   private a0: Float32Array;
   private grav: Float32Array;
   private drag: Float32Array;
+  private frame: Float32Array;
+  private frame0: Float32Array;
+  private frames: number;
   private next = 0;
   private material: THREE.ShaderMaterial;
   private tmpA = new THREE.Color();
   private tmpB = new THREE.Color();
 
-  constructor(cap: number, texture: THREE.Texture, additive: boolean) {
+  /** `grid` > 1 treats the texture as a grid×grid flipbook played over each particle's life. */
+  constructor(cap: number, texture: THREE.Texture, additive: boolean, grid = 1) {
     this.cap = cap;
+    this.frames = grid * grid;
+    this.frame = new Float32Array(cap);
+    this.frame0 = new Float32Array(cap);
     this.pos = new Float32Array(cap * 3);
     this.vel = new Float32Array(cap * 3);
     this.col = new Float32Array(cap * 4);
@@ -79,10 +93,11 @@ export class ParticleSystem {
     geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3).setUsage(THREE.DynamicDrawUsage));
     geo.setAttribute('aColor', new THREE.BufferAttribute(this.col, 4).setUsage(THREE.DynamicDrawUsage));
     geo.setAttribute('aSize', new THREE.BufferAttribute(this.size, 1).setUsage(THREE.DynamicDrawUsage));
+    geo.setAttribute('aFrame', new THREE.BufferAttribute(this.frame, 1).setUsage(THREE.DynamicDrawUsage));
     this.material = new THREE.ShaderMaterial({
       vertexShader: VERT,
       fragmentShader: FRAG,
-      uniforms: { uTex: { value: texture }, uScale: { value: 800 } },
+      uniforms: { uTex: { value: texture }, uScale: { value: 800 }, uGrid: { value: grid } },
       transparent: true,
       depthWrite: false,
       blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
@@ -115,6 +130,8 @@ export class ParticleSystem {
     this.a0[i] = p.alpha ?? 1;
     this.grav[i] = p.gravity ?? 0;
     this.drag[i] = p.drag ?? 0;
+    // Start somewhere in the first quarter so neighbouring puffs don't look identical.
+    this.frame0[i] = Math.floor(Math.random() * this.frames * 0.25);
   }
 
   update(dt: number) {
@@ -134,6 +151,7 @@ export class ParticleSystem {
       this.pos[i * 3 + 1] += this.vel[i * 3 + 1] * dt;
       this.pos[i * 3 + 2] += this.vel[i * 3 + 2] * dt;
       this.size[i] = this.s0[i] + (this.s1[i] - this.s0[i]) * t;
+      if (this.frames > 1) this.frame[i] = Math.min(this.frames - 1, this.frame0[i] + Math.floor(t * this.frames * 0.75));
       for (let k = 0; k < 3; k++) this.col[i * 4 + k] = this.c0[i * 3 + k] + (this.c1[i * 3 + k] - this.c0[i * 3 + k]) * t;
       // quick fade in, smooth fade out
       this.col[i * 4 + 3] = this.a0[i] * Math.min(1, t * 8) * (1 - t * t);
@@ -142,5 +160,6 @@ export class ParticleSystem {
     g.attributes.position.needsUpdate = true;
     g.attributes.aColor.needsUpdate = true;
     g.attributes.aSize.needsUpdate = true;
+    if (this.frames > 1) g.attributes.aFrame.needsUpdate = true;
   }
 }

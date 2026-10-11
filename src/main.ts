@@ -6,6 +6,8 @@ import { Bot, type Difficulty } from './ai/bot';
 import { Sim } from './sim/game';
 import type { Command, GameEvent, PlayerSetup, SimRules } from './sim/types';
 import { GameRenderer } from './render/renderer';
+import { loadUnitModels } from './render/unitModel';
+import { loadObstacleModels } from './render/obstacleModels';
 import { loadRealIcons, makeCursor } from './render/textures';
 import { Hud, playerName, SHOP_ICON_PATHS } from './ui/hud';
 import { SoundSystem, type Sfx } from './audio';
@@ -805,7 +807,7 @@ onAssetStatus(() => {
 });
 
 async function boot() {
-  await initAssets();
+  await Promise.all([initAssets(), loadUnitModels(), loadObstacleModels()]);
   await iconsLoading;
   const joinCode = new URLSearchParams(location.search).get('join');
   if (joinCode) {

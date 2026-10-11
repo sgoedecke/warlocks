@@ -3,10 +3,12 @@ import { MODEL_PATHS, PLAYER_COLORS, SPELLS, WARLOCK_RADIUS } from '../config';
 import type { Sim } from '../sim/game';
 import type { GameEvent, Obstacle, Projectile, ProjectileKind, Warlock } from '../sim/types';
 import { ParticleSystem, type ParticleSpec } from './particles';
+import { openTextureCanvas } from './opentex/particles';
 import { makeGlowTexture, makeRingTexture, makeScorchTexture, makeShadowTexture } from './textures';
 import { ModelLibrary } from './models';
 import type { MdxInstance } from './mdx';
 import { TerrainView } from './terrain';
+import { obstacleModel } from './obstacleModels';
 import { WarlockModel } from './unitModel';
 
 // WC3 default game camera: angle of attack 304 (56 degrees down), distance 1650.
@@ -43,50 +45,6 @@ function disposeObj(obj: THREE.Object3D) {
     const mat = m.material as THREE.Material | undefined;
     if (mat) mat.dispose();
   });
-}
-
-/** Stand-ins for the base-game obstacle doodads (columns, rock pillars, barrens trees). */
-function proceduralObstacle(o: Obstacle): THREE.Object3D {
-  const g = new THREE.Group();
-  const type = Number(o.variant.slice(3)) || 0;
-  const stone = (c: number) => new THREE.MeshLambertMaterial({ color: c });
-  if (type === 4 || type === 5) {
-    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(9, 14, 90, 7), stone(0x5a4128));
-    trunk.position.y = 45;
-    const crown = new THREE.Mesh(new THREE.IcosahedronGeometry(50, 0), stone(type === 4 ? 0x5d6b2a : 0x6f7a35));
-    crown.scale.set(1.2, 0.55, 1.2);
-    crown.position.y = 100;
-    g.add(trunk, crown);
-  } else if (type === 2 || type === 3 || type === 8 || type === 9) {
-    const geo = new THREE.CylinderGeometry(18, 34, type === 3 || type === 9 ? 120 : 150, 7, 4);
-    const pos = geo.attributes.position as THREE.BufferAttribute;
-    for (let i = 0; i < pos.count; i++) {
-      const h = Math.sin(i * 12.9898 + type) * 43758.5453;
-      const j = (h - Math.floor(h) - 0.5) * 10;
-      pos.setXYZ(i, pos.getX(i) + j, pos.getY(i) + j * 0.5, pos.getZ(i) - j);
-    }
-    geo.computeVertexNormals();
-    const rock = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: type >= 8 ? 0x6b4a3a : 0x7a6a58, flatShading: true }));
-    rock.position.y = (geo.parameters.height as number) / 2 - 4;
-    g.add(rock);
-  } else {
-    const ruined = type === 0 || type === 6;
-    const h = ruined ? 100 : 170;
-    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(20, 22, h, 12), stone(type >= 6 ? 0x8d8678 : 0xb4ae9e));
-    shaft.position.y = h / 2 + 12;
-    const base = new THREE.Mesh(new THREE.BoxGeometry(56, 14, 56), stone(0x8f8a7c));
-    base.position.y = 7;
-    g.add(shaft, base);
-    if (!ruined) {
-      const cap = new THREE.Mesh(new THREE.BoxGeometry(50, 12, 50), stone(0x9f9a8c));
-      cap.position.y = h + 18;
-      g.add(cap);
-    }
-  }
-  g.scale.setScalar(o.scale);
-  g.rotation.y = o.facing;
-  g.position.set(o.x, 0, -o.y);
-  return g;
 }
 
 interface UnitView {
@@ -143,6 +101,8 @@ export class GameRenderer {
   private transients: Transient[] = [];
   private linkBeams = new Map<number, THREE.Mesh>();
   private fx: ParticleSystem;
+  /** Additive billowing flame puffs (8x8 cloud flipbook). */
+  private fire: ParticleSystem;
   private smoke: ParticleSystem;
   private tex: Record<string, THREE.Texture> = {};
   private time = 0;
@@ -212,9 +172,10 @@ export class GameRenderer {
     this.lib = new ModelLibrary(this.scene);
     this.lib.preload([WARLOCK_MODEL, 'fb2.mdl', ...Object.values(MODEL_PATHS), ...Object.values(SPELLS).map((s) => s.modelPath)]);
 
-    this.fx = new ParticleSystem(5000, this.tex.glow, true);
-    this.smoke = new ParticleSystem(2500, this.tex.glow, false);
-    this.scene.add(this.fx.points, this.smoke.points);
+    this.fx = new ParticleSystem(3000, this.tex.glow, true);
+    this.fire = new ParticleSystem(2000, canvasTex(openTextureCanvas('textures\\clouds8x8.blp', 8, 8)!), true, 8);
+    this.smoke = new ParticleSystem(2000, canvasTex(openTextureCanvas('textures\\clouds8x8fade.blp', 8, 8)!), false, 8);
+    this.scene.add(this.fx.points, this.fire.points, this.smoke.points);
 
     this.aoe = new THREE.Mesh(
       new THREE.PlaneGeometry(1, 1),
@@ -238,8 +199,8 @@ export class GameRenderer {
     const pl = new THREE.DirectionalLight(0xffeedd, 2.4);
     pl.position.set(100, 120, 60);
     this.portraitScene.add(pl, new THREE.HemisphereLight(0x8888aa, 0x442200, 1.2));
-    this.portraitCam.position.set(105, 72, 30);
-    this.portraitCam.lookAt(0, 50, 0);
+    this.portraitCam.position.set(85, 82, 18);
+    this.portraitCam.lookAt(0, 68, 0);
 
     for (const p of sim.players) this.createUnit(p);
     this.resize();
@@ -282,6 +243,7 @@ export class GameRenderer {
     this.camera.updateProjectionMatrix();
     const ph = h * this.renderer.getPixelRatio();
     this.fx.setScale(ph, CAM_FOV);
+    this.fire.setScale(ph, CAM_FOV);
     this.smoke.setScale(ph, CAM_FOV);
   }
 
@@ -328,7 +290,7 @@ export class GameRenderer {
 
   private createUnit(p: Warlock) {
     const col = new THREE.Color(PLAYER_COLORS[p.color].css);
-    const model = new WarlockModel(col, this.tex.glow);
+    const model = new WarlockModel(col);
     model.root.scale.setScalar(UNIT_SCALE);
     const shadow = new THREE.Mesh(
       new THREE.PlaneGeometry(WARLOCK_RADIUS * 4, WARLOCK_RADIUS * 4),
@@ -394,14 +356,13 @@ export class GameRenderer {
         v.mdx.position.set(x, 0, -y);
         v.mdx.rotation.y = facing;
       } else {
-        m.update({ moving: v.moving, casting: v.casting, knocked: v.knocked, time: this.time + p.id * 1.7 });
+        m.update({ moving: v.moving, casting: v.casting, knocked: v.knocked, dead: !p.alive, dt });
       }
 
       let opacity = 1;
       let visible = true;
       if (!p.alive) {
         v.deadT += dt;
-        m.root.rotation.z = Math.min(1.45, v.deadT * 3) * 1;
         m.root.position.y -= v.deadT * (p.diedInLava ? 25 : 6);
         opacity = Math.max(0, 1 - Math.max(0, v.deadT - 1.2) / 1.5);
         visible = opacity > 0.01;
@@ -608,11 +569,11 @@ export class GameRenderer {
         const jz = rand(-5, 5);
         switch (pr.kind) {
           case 'fireball':
-            this.fx.emit({ x: x + jx, y: h + rand(-5, 5), z: z + jz, vx: rand(-20, 20), vy: rand(10, 40), vz: rand(-20, 20), life: rand(0.25, 0.45), size: rand(34, 48), endSize: 8, color: 0xffb030, endColor: 0xc02000 });
+            this.fire.emit({ x: x + jx, y: h + rand(-5, 5), z: z + jz, vx: rand(-20, 20), vy: rand(10, 40), vz: rand(-20, 20), life: rand(0.3, 0.5), size: rand(44, 60), endSize: 14, color: 0xffb030, endColor: 0xc02000 });
             if (Math.random() < 0.3) this.smoke.emit({ x, y: h, z, vy: 30, life: 0.9, size: 22, endSize: 50, color: 0x2a2220, alpha: 0.45 });
             break;
           case 'homing':
-            this.fx.emit({ x: x + jx, y: h, z: z + jz, life: rand(0.3, 0.5), size: 30, endSize: 6, color: 0xa0ff50, endColor: 0x206000 });
+            this.fire.emit({ x: x + jx, y: h, z: z + jz, life: rand(0.3, 0.5), size: 40, endSize: 10, color: 0xa0ff50, endColor: 0x206000 });
             if (Math.random() < 0.3) this.smoke.emit({ x, y: h, z, vy: 20, life: 1, size: 18, endSize: 40, color: 0x404838, alpha: 0.4 });
             break;
           case 'displacement':
@@ -805,7 +766,7 @@ export class GameRenderer {
       stone.rotation.x += dt * 4;
       stone.rotation.y += dt * 3;
       for (let i = 0; i < 3; i++) {
-        this.fx.emit({ x: rock.position.x + rand(-15, 15), y: rock.position.y + rand(-15, 15), z: rock.position.z + rand(-15, 15), life: 0.5, size: 60, endSize: 12, color: 0xffa030, endColor: 0xa01000 });
+        this.fire.emit({ x: rock.position.x + rand(-15, 15), y: rock.position.y + rand(-15, 15), z: rock.position.z + rand(-15, 15), life: 0.5, size: 75, endSize: 20, color: 0xffa030, endColor: 0xa01000 });
       }
       this.smoke.emit({ x: rock.position.x, y: rock.position.y, z: rock.position.z, life: 1.4, size: 50, endSize: 110, color: 0x1a1210, alpha: 0.6 });
     });
@@ -823,8 +784,8 @@ export class GameRenderer {
   }
 
   private meteorImpact(x: number, y: number, radius: number) {
-    this.burst(x, y, 20, 90, { speed: radius * 3.2, color: 0xffc040, endColor: 0xb01000, size: 60, endSize: 10, life: 0.7, drag: 2.5, vy: 80 });
-    this.burst(x, y, 20, 40, { speed: radius * 1.5, color: 0x2a1e18, size: 70, endSize: 160, life: 1.8, drag: 2, vy: 60, alpha: 0.7 }, this.smoke);
+    this.burst(x, y, 20, 90, { speed: radius * 3.2, color: 0xffc040, endColor: 0xb01000, size: 75, endSize: 20, life: 0.7, drag: 2.5, vy: 80 }, this.fire);
+    this.burst(x, y, 70, 40, { speed: radius * 1.5, color: 0x2a1e18, size: 70, endSize: 160, life: 1.8, drag: 2, vy: 90, alpha: 0.7 }, this.smoke);
     this.burst(x, y, 20, 25, { speed: 400, color: 0x281810, size: 14, endSize: 10, life: 1.0, gravity: 900, vy: 300, alpha: 1 }, this.smoke);
     this.flash(x, y, 40, 0xff8020, radius * 3.5, 0.35);
     this.scorch(x, y, radius * 2.2);
@@ -900,7 +861,7 @@ export class GameRenderer {
         };
         const [c0, c1] = colors[e.kind] ?? [0xffc040, 0x8040ff];
         const big = e.kind === 'fireball' || e.kind === 'homing' || e.kind === 'clash';
-        this.burst(e.x, e.y, PROJ_HEIGHT, big ? 34 : 16, { speed: big ? 330 : 200, color: c0, endColor: c1, size: big ? 40 : 20, endSize: 6, life: 0.5, drag: 3 });
+        this.burst(e.x, e.y, PROJ_HEIGHT, big ? 34 : 16, { speed: big ? 330 : 200, color: c0, endColor: c1, size: big ? 52 : 20, endSize: big ? 14 : 6, life: 0.5, drag: 3 }, big ? this.fire : this.fx);
         if (big) {
           this.burst(e.x, e.y, PROJ_HEIGHT, 10, { speed: 90, color: 0x2a2220, size: 40, endSize: 90, life: 1.1, drag: 2, vy: 40, alpha: 0.55 }, this.smoke);
           this.flash(e.x, e.y, PROJ_HEIGHT, c0, 170, 0.22);
@@ -940,7 +901,7 @@ export class GameRenderer {
       case 'death':
         if (e.inLava) {
           for (let i = 0; i < 40; i++)
-            this.fx.emit({ x: e.x + rand(-25, 25), y: rand(0, 30), z: -e.y + rand(-25, 25), vy: rand(150, 400), vx: rand(-40, 40), vz: rand(-40, 40), life: rand(0.6, 1.1), size: rand(30, 50), endSize: 6, color: 0xffb040, endColor: 0xa01000 });
+            this.fire.emit({ x: e.x + rand(-25, 25), y: rand(0, 30), z: -e.y + rand(-25, 25), vy: rand(150, 400), vx: rand(-40, 40), vz: rand(-40, 40), life: rand(0.6, 1.1), size: rand(40, 64), endSize: 12, color: 0xffb040, endColor: 0xa01000 });
           this.burst(e.x, e.y, 30, 20, { speed: 60, color: 0x201810, size: 50, endSize: 120, life: 2, vy: 90, alpha: 0.6 }, this.smoke);
         } else {
           this.burst(e.x, e.y, 40, 30, { speed: 160, color: 0x701010, endColor: 0x200000, size: 22, endSize: 6, life: 0.8, gravity: 300, alpha: 0.9 }, this.smoke);
@@ -976,7 +937,7 @@ export class GameRenderer {
       inst.position.set(o.x, 0, -o.y);
       return { obj: inst, mdx: true };
     }
-    return { obj: proceduralObstacle(o), mdx: false };
+    return { obj: obstacleModel(o), mdx: false };
   }
 
   private updateObstacles() {
@@ -1001,7 +962,7 @@ export class GameRenderer {
     if (v.mdx) this.lib.release(v.obj as MdxInstance);
     else {
       this.scene.remove(v.obj);
-      disposeObj(v.obj);
+      if (!v.obj.userData.shared) disposeObj(v.obj);
     }
   }
 
@@ -1024,6 +985,7 @@ export class GameRenderer {
     }
     this.transients = this.transients.filter((t) => t.life > 0);
     this.fx.update(dt);
+    this.fire.update(dt);
     this.smoke.update(dt);
     this.updateObstacles();
 
@@ -1095,14 +1057,13 @@ export class GameRenderer {
     }
     if (this.portraitColor !== p.color) {
       if (this.portraitModel) this.portraitScene.remove(this.portraitModel.root);
-      this.portraitModel = new WarlockModel(new THREE.Color(PLAYER_COLORS[p.color].css), this.tex.glow);
+      this.portraitModel = new WarlockModel(new THREE.Color(PLAYER_COLORS[p.color].css));
       this.portraitModel.root.rotation.y = 0.35;
       this.portraitScene.add(this.portraitModel.root);
       this.portraitColor = p.color;
     }
     const m = this.portraitModel!;
-    m.update({ moving: 0, casting: v.casting * 0.5, knocked: 0, time: this.time });
-    m.setTint(new THREE.Color(0.15, 0.15, 0.15), p.alive ? 0 : 0.7);
+    m.update({ moving: 0, casting: v.casting, knocked: 0, dead: !p.alive, dt });
     pr.render(this.portraitScene, this.portraitCam);
   }
 }
