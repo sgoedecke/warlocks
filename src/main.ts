@@ -141,7 +141,6 @@ class Game {
       onPause: () => this.setPaused(true),
       onResume: () => this.setPaused(false),
       onQuit: () => this.exit(false),
-      onControls: showControls,
       onPlayAgain: () => this.exit(true),
     });
     this.bindInput();
@@ -618,43 +617,6 @@ function escapeHtml(t: string) {
   return t.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 }
 
-const CONTROLS: [string, string][] = [
-  ['WASD / right-click', 'Move'],
-  ['Hotkey, then left-click', 'Cast'],
-  ['X', 'Stop'],
-  ['Esc', 'Cancel'],
-  ['Arrows / screen edge', 'Scroll (while dead)'],
-  ['Wheel', 'Zoom'],
-  ['Tab', 'Scores'],
-  ['Enter', 'Chat'],
-  ['F10', 'Menu'],
-  [[...new Set(ALL_SPELLS.map((id) => SPELLS[id].hotkey))].join(' '), 'Spells'],
-];
-
-/** The key bindings, in a modal over whatever is showing. */
-function showControls() {
-  const el = document.createElement('div');
-  el.className = 'modal-backdrop';
-  el.innerHTML = `<div class="modal frame controls">
-    <table>${CONTROLS.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('')}</table>
-    <div class="buttons"><button class="wc-btn big" data-close>Close</button></div>
-  </div>`;
-  const close = () => {
-    el.remove();
-    window.removeEventListener('keydown', onKey, true);
-  };
-  const onKey = (e: KeyboardEvent) => {
-    if (e.key !== 'Escape') return;
-    e.stopPropagation();
-    close();
-  };
-  window.addEventListener('keydown', onKey, true);
-  el.addEventListener('click', (e) => {
-    if (e.target === el || (e.target as HTMLElement).closest('[data-close]')) close();
-  });
-  document.body.appendChild(el);
-}
-
 function showMenu(notice = '') {
   const s = loadSettings();
   const menu = document.createElement('div');
@@ -669,7 +631,6 @@ function showMenu(notice = '') {
         <input data-code placeholder="Code" maxlength="12" spellcheck="false" autocomplete="off">
         <button class="wc-btn" data-join>Join</button>
       </div>
-      <button class="wc-btn big" data-controls>Controls</button>
       <div class="mp-notice ${notice ? '' : 'hidden'}">${escapeHtml(notice)}</div>
     </div>`;
   app.appendChild(menu);
@@ -697,7 +658,6 @@ function showMenu(notice = '') {
   q('[data-quick]').addEventListener('click', () => quickPlay(1, leave()));
   q('[data-host]').addEventListener('click', () => showLobby(NetSession.host(leave(), RULES, DIFFICULTY, s.bots)));
   q('[data-join]').addEventListener('click', join);
-  q('[data-controls]').addEventListener('click', showControls);
   codeInput.addEventListener('keydown', (e) => e.key === 'Enter' && join());
 }
 

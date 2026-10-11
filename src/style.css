@@ -693,7 +693,19 @@ body {
 }
 
 #menu .main-menu {
-  width: 300px;
+  width: min(440px, 90vw);
+  gap: 14px;
+  padding: 30px 34px;
+}
+
+.main-menu .wc-btn {
+  font-size: 24px;
+  padding: 14px 24px;
+}
+
+#menu .main-menu input {
+  font-size: 20px;
+  padding: 16px 14px;
 }
 
 .main-menu input,
@@ -726,17 +738,6 @@ body {
   color: #ff9a6a;
   font-size: 13px;
   line-height: 1.45;
-}
-
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.6);
-  z-index: 200;
-}
-
-.modal.controls td:last-child {
-  color: var(--gold);
 }
 
 #menu .lobby-panel {

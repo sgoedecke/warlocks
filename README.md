@@ -52,8 +52,6 @@ Everything is drawn in code or comes from openly licensed models, icons and font
 | `F10` / `Esc` | Menu |
 | `Enter` | Chat (online games) |
 
-The same list is under **Controls** on the main menu and in the game menu.
-
 ## Online multiplayer
 
 **Quick Play** on the main menu joins the public lobby. If nobody is waiting there, you become its host. Whoever hosts can add computer players and start the game when ready. Once a game starts, newcomers go to the next public lobby, so a new one is always open.

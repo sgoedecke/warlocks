@@ -16,7 +16,6 @@ export interface HudCallbacks {
   onPause: () => void;
   onResume: () => void;
   onQuit: () => void;
-  onControls: () => void;
   onPlayAgain: () => void;
 }
 
@@ -154,7 +153,6 @@ export class Hud {
       <div class="modal frame pause hidden">
         <div class="buttons">
           <button class="wc-btn big" data-act="resume">Return to Game</button>
-          <button class="wc-btn big" data-act="controls">Controls</button>
           <button class="wc-btn big" data-act="quit">Quit to Main Menu</button>
         </div>
       </div>
@@ -194,7 +192,6 @@ export class Hud {
       else if (act === 'ready') cb.onReady();
       else if (act === 'resume') cb.onResume();
       else if (act === 'quit') cb.onQuit();
-      else if (act === 'controls') cb.onControls();
       else if (act === 'again') cb.onPlayAgain();
     });
     q('.mb-title').addEventListener('click', () => this.toggleScores());
