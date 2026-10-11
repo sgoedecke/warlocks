@@ -1,3 +1,5 @@
+import '@fontsource/marcellus/latin-400.css';
+import cinzelDigits from '@fontsource/cinzel/files/cinzel-latin-400-normal.woff2?url';
 import './style.css';
 import {
   ALL_SPELLS, DT, PLAYER_COLORS, shuffledBotNames, SPELLS, WARLOCK_CARD, WARLOCK_RADIUS, type SpellId,
@@ -831,7 +833,11 @@ function startGame(name: string, bots: number, rules?: Partial<SimRules>, dev?: 
 }
 
 async function boot() {
-  await Promise.all([loadUnitModels(), loadObstacleModels()]);
+  // Marcellus's old-style figures make 0 and 1 look like O and I, so digits come from Cinzel.
+  const digits = new FontFace('HudDigits', `url(${cinzelDigits})`, { unicodeRange: 'U+0030-0039' });
+  document.fonts.add(digits);
+  const fonts = Promise.all([digits.load(), document.fonts.load('16px Marcellus')]).catch(() => {});
+  await Promise.all([loadUnitModels(), loadObstacleModels(), fonts]);
   const joinCode = new URLSearchParams(location.search).get('join');
   if (joinCode) {
     const name = new URLSearchParams(location.search).get('name');

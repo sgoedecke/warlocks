@@ -145,7 +145,7 @@ const iconCache = new Map<string, string>();
 const iconKey = (path: string) => path.toLowerCase().replace(/\//g, '\\');
 
 /** A command button icon by its WC3 path: an open painted version, else a generic stand-in. */
-export function btnIcon(path: string, size = 64): string {
+export function btnIcon(path: string, size = 112): string {
   const key = `btn:${iconKey(path)}:${size}`;
   let url = iconCache.get(key);
   if (!url) {
@@ -170,7 +170,7 @@ export function btnIcon(path: string, size = 64): string {
   return url;
 }
 
-export function spellIcon(id: SpellId, size = 64): string {
+export function spellIcon(id: SpellId, size = 112): string {
   const key = `${id}:${size}`;
   let url = iconCache.get(key);
   if (!url) {

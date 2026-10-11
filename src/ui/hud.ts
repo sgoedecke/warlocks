@@ -5,6 +5,7 @@ import type { Sim } from '../sim/game';
 import type { GameEvent, Warlock } from '../sim/types';
 import { btnIcon, goldIcon, spellIcon } from '../render/textures';
 import type { GameRenderer } from '../render/renderer';
+import { WORLD_PX, WORLD_TILES, proceduralWorldTexture } from '../render/tileTextures';
 
 export interface HudCallbacks {
   onSpell: (id: SpellId) => void;
@@ -97,7 +98,7 @@ export class Hud {
   private mg: CanvasRenderingContext2D;
   private els: Record<string, HTMLElement> = {};
   /** One command-card slot per hotkey, showing whichever of its spells the player has learned. */
-  private cmdSlots: { el: HTMLElement; spells: SpellId[]; id: SpellId | null }[] = [];
+  private cmdSlots: { el: HTMLElement; spells: SpellId[]; id: SpellId | null; cooling: boolean }[] = [];
   private shopItems = new Map<ProductId, HTMLElement>();
   private shopCells: { page: ShopPage; el: HTMLElement; toggle?: 'firespray' | 'splitter' }[] = [];
   private shopPage: ShopPage = 'merchant';
@@ -135,17 +136,10 @@ export class Hud {
       <div class="center-text"></div>
       <div class="error-text"></div>
       <div class="tooltip hidden"></div>
-      <div class="console frame">
-        <div class="minimap-frame"><canvas width="340" height="340"></canvas></div>
-        <div class="info">
-          <div class="portrait-wrap"><div class="portrait"></div><div class="portrait-hp">100 / 100</div></div>
-          <div class="unit-info">
-            <div class="name"></div>
-            <div class="cls">Warlock</div>
-            <div class="stats"></div>
-            <div class="buffs"></div>
-          </div>
-        </div>
+      <div class="minimap-frame frame"><canvas width="340" height="340"></canvas></div>
+      <div class="spellbar">
+        <div class="buffs"></div>
+        <div class="hpbar"><div class="hp-fill"></div><div class="hp-text"></div></div>
         <div class="command-card"></div>
       </div>
       <div class="shop frame hidden">
@@ -184,12 +178,9 @@ export class Hud {
     this.els.center = q('.center-text');
     this.els.error = q('.error-text');
     this.els.tooltip = q('.tooltip');
-    this.els.portrait = q('.portrait');
-    this.renderer.attachPortrait(this.els.portrait);
-    this.els.portraitHp = q('.portrait-hp');
-    this.els.name = q('.unit-info .name');
-    this.els.stats = q('.unit-info .stats');
-    this.els.buffs = q('.unit-info .buffs');
+    this.els.hpFill = q('.hp-fill');
+    this.els.hpText = q('.hp-text');
+    this.els.buffs = q('.spellbar .buffs');
     this.els.shop = q('.shop');
     this.els.pause = q('.pause');
     this.els.gameover = q('.gameover');
@@ -236,21 +227,13 @@ export class Hud {
     this.overlayFont = `bold 16px ${getComputedStyle(document.body).fontFamily}`;
   }
 
-  isOverUi(target: EventTarget | null): boolean {
-    const el = target as HTMLElement | null;
-    if (!el || !el.closest) return false;
-    return !!el.closest('.console, .topbar > *, .multiboard, .shop, .modal');
-  }
-
   private buildCommandCard(card: HTMLElement) {
-    for (let i = 0; i < 12; i++) {
+    for (const first of WARLOCK_CARD) {
       const b = document.createElement('div');
       b.className = 'cmd empty';
       card.appendChild(b);
-      const first = WARLOCK_CARD[i];
-      if (!first) continue;
       const column = SPELLS[first].column;
-      const slot = { el: b, spells: column === 'core' ? [first] : ALL_SPELLS.filter((s) => SPELLS[s].column === column), id: null as SpellId | null };
+      const slot = { el: b, spells: column === 'core' ? [first] : ALL_SPELLS.filter((s) => SPELLS[s].column === column), id: null as SpellId | null, cooling: false };
       b.innerHTML = `<div class="cd" style="--p:1"></div><div class="cd-text"></div><div class="hk-badge">${SPELLS[first].hotkey}</div><div class="lvl"></div>`;
       b.addEventListener('mousedown', (e) => {
         e.stopPropagation();
@@ -466,19 +449,17 @@ export class Hud {
     this.errorTimer -= dt;
     if (this.errorTimer <= 0 && this.els.error.style.opacity !== '0') this.els.error.style.opacity = '0';
 
-    // Portrait & unit info
-    setText(this.els.portraitHp, `${Math.ceil(Math.max(0, me.hp))} / ${WARLOCK_HP}`);
-    setStyle(this.els.portraitHp, 'color', me.hp / WARLOCK_HP > 0.5 ? '#2ad52a' : me.hp / WARLOCK_HP > 0.25 ? '#e0d020' : '#e02020');
-    setHtml(this.els.name, playerName(me));
-    const statsHtml = `<div>Kills: <span>${me.stats.kills}</span></div><div>Wins: <span>${me.stats.wins}</span></div>` +
-      `<div>Deaths: <span>${me.stats.deaths}</span></div><div>Damage: <span>${Math.round(me.stats.damage)}</span></div>`;
-    setHtml(this.els.stats, statsHtml);
+    // Health and buffs
+    const hp = Math.max(0, me.hp) / WARLOCK_HP;
+    setStyle(this.els.hpFill, 'width', `${(hp * 100).toFixed(1)}%`);
+    setStyle(this.els.hpFill, 'background-color', hp > 0.5 ? '#2fbf3a' : hp > 0.25 ? '#d8b820' : '#d42a20');
+    setText(this.els.hpText, `${Math.ceil(Math.max(0, me.hp))} / ${WARLOCK_HP}`);
     const buffs: string[] = [];
-    if (me.shield > 0) buffs.push(`<img title="Shield" src="${spellIcon('shield', 32)}">`);
-    if (me.windwalk > 0) buffs.push(`<img title="Windwalk" src="${spellIcon('windwalk', 32)}">`);
-    if (me.link) buffs.push(`<img title="Link" src="${spellIcon('link', 32)}">`);
+    if (me.shield > 0) buffs.push(`<img title="Shield" src="${spellIcon('shield', 48)}">`);
+    if (me.windwalk > 0) buffs.push(`<img title="Windwalk" src="${spellIcon('windwalk', 48)}">`);
+    if (me.link) buffs.push(`<img title="Link" src="${spellIcon('link', 48)}">`);
     if (me.inLava && me.alive) buffs.push(`<span style="color:#ff6020">Burning!</span>`);
-    if (!me.alive) buffs.push(`<span style="color:#aaa">Dead - waiting for next round</span>`);
+    if (!me.alive) buffs.push(`<span style="color:#aaa">Dead: waiting for next round</span>`);
     const bh = buffs.join('');
     setHtml(this.els.buffs, bh);
 
@@ -496,6 +477,14 @@ export class Hud {
       setStyle(b, 'background-image', `url(${spellIcon(id)})`);
       const cd = me.cooldowns[id] ?? 0;
       const total = spellCooldown(id, lvl);
+      // Flash the button as it comes off cooldown.
+      if (slot.cooling && cd <= 0) {
+        b.classList.remove('ready');
+        void b.offsetWidth;
+        b.classList.add('ready');
+      }
+      slot.cooling = cd > 0;
+      b.classList.toggle('cooling', cd > 0);
       // The cooldown sweep is drawn in CSS; ~100 steps is visually continuous and avoids a restyle every frame.
       setStyle(b.querySelector('.cd') as HTMLElement, '--p', cd > 0 ? (1 - cd / total).toFixed(2) : '1');
       const txt = cd > 0 ? (cd < 1 ? cd.toFixed(1) : String(Math.ceil(cd))) : '';
@@ -612,7 +601,9 @@ export class Hud {
       tt.style.top = `${r.top}px`;
       tt.style.right = 'auto';
       tt.style.bottom = 'auto';
+      tt.style.transform = 'none';
     } else {
+      tt.style.transform = '';
       tt.style.left = '';
       tt.style.top = '';
       tt.style.right = '';
@@ -674,19 +665,33 @@ export class Hud {
   private minimapTerrain = document.createElement('canvas');
   private minimapTerrainVersion = -1;
 
-  /** WC3 minimaps show the playable map's tiles; Warlocks' arena is the painted square in the middle. */
+  /** The arena's tiles, coloured from the same procedural textures the ground is drawn with. */
   private paintMinimapTerrain() {
     const c = this.minimapTerrain;
     const n = Math.round((MAP_MAX - MAP_MIN) / TILE_SIZE);
-    c.width = c.height = n;
+    const P = 4;
+    c.width = c.height = n * P;
     const g = c.getContext('2d')!;
-    const { lava, safe, lavaColor, safeColor } = this.sim.theme;
-    const css = (h: number) => `#${h.toString(16).padStart(6, '0')}`;
+    const img = g.createImageData(n * P, n * P);
+    const { lava, safe } = this.sim.theme;
+    const period = WORLD_TILES * TILE_SIZE;
+    const frac = (v: number) => v - Math.floor(v);
     for (let ty = 0; ty < n; ty++) for (let tx = 0; tx < n; tx++) {
       const code = this.sim.terrainAt(MAP_MIN + (tx + 0.5) * TILE_SIZE, MAP_MIN + (ty + 0.5) * TILE_SIZE);
-      g.fillStyle = code === lava ? css(lavaColor) : code === safe ? css(safeColor) : code === ICE_TILE ? '#3a6890' : '#000';
-      g.fillRect(tx, n - 1 - ty, 1, 1);
+      const tex = code === lava || code === safe || code === ICE_TILE ? proceduralWorldTexture(code) : null;
+      for (let py = 0; py < P; py++) for (let px = 0; px < P; px++) {
+        const o = (((n - 1 - ty) * P + (P - 1 - py)) * n * P + tx * P + px) * 4;
+        img.data[o + 3] = 255;
+        if (!tex) continue;
+        const u = frac((MAP_MIN + (tx + (px + 0.5) / P) * TILE_SIZE) / period);
+        const v = frac((MAP_MIN + (ty + (py + 0.5) / P) * TILE_SIZE) / period);
+        const t = (Math.floor((1 - v) * WORLD_PX) * WORLD_PX + Math.floor(u * WORLD_PX)) * 4;
+        img.data[o] = tex[t];
+        img.data[o + 1] = tex[t + 1];
+        img.data[o + 2] = tex[t + 2];
+      }
     }
+    g.putImageData(img, 0, 0);
   }
 
   private drawMinimap() {
@@ -697,7 +702,6 @@ export class Hud {
       this.minimapTerrainVersion = this.sim.terrainVersion;
       this.paintMinimapTerrain();
     }
-    g.imageSmoothingEnabled = false;
     g.drawImage(this.minimapTerrain, 0, 0, S, S);
     for (const p of this.sim.players) {
       if (!p.alive || (p.windwalk > 0 && p.id !== this.localId)) continue;

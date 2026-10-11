@@ -27,13 +27,14 @@ Every push to `master` builds the site and deploys it to GitHub Pages (`.github/
 
 ## Art
 
-Everything is drawn in code or comes from openly licensed models; the repository contains no Blizzard assets.
+Everything is drawn in code or comes from openly licensed models, icons and fonts; the repository contains no Blizzard assets.
 
 - **Warlock**: [Animated Wizard](https://poly.pizza/m/kttbFvCl2C) by Quaternius ([CC-BY 3.0](https://creativecommons.org/licenses/by/3.0/)). The texture is recoloured per team at load, and only the clips the game uses are kept; the texture is resized to 512² JPEG.
 - **Obstacles**: columns, rock pillars and trees from Kenney's [Nature Kit](https://kenney.nl/assets/nature-kit) (CC0). They are recoloured for each tileset and given procedural painted detail textures with box-projected UVs (`src/render/obstacleModels.ts`).
-- **Terrain**: procedural tile textures (`src/render/tileTextures.ts`) drawn with a port of WC3's ground tile shader (`src/render/terrain.ts`), which picks atlas cells from the tile types at each tile's four corners. That's why the lava edge steps tile by tile like the original.
+- **Terrain**: procedural tile textures (`src/render/tileTextures.ts`) drawn with a port of WC3's ground tile shader (`src/render/terrain.ts`), which picks atlas cells from the tile types at each tile's four corners. That's why the lava edge steps tile by tile like the original. To hide repetition, the shader blends two rotated placements of each texture under a slow mask and adds broad light and dark patches. The minimap samples the same textures.
 - **Effects**: point-sprite particles, with fire and smoke using procedural 8×8 cloud flipbooks (`src/render/clouds.ts`).
-- **Command button icons**: canvas-painted icons for every spell, item, upgrade and menu button (`src/render/icons.ts`).
+- **Command button icons**: glyphs from [game-icons.net](https://game-icons.net) by Lorc, Delapouite and Lucas ([CC BY 3.0](https://creativecommons.org/licenses/by/3.0/)), lit and framed in code (`src/render/icons.ts`). `node scripts/build-icons.mjs` regenerates `src/render/gameIconPaths.ts` from the glyph names in `icons.ts`.
+- **Font**: [Marcellus](https://fonts.google.com/specimen/Marcellus) by Astigmatic ([SIL OFL](https://openfontlicense.org)), via `@fontsource/marcellus`, with digits from [Cinzel](https://fonts.google.com/specimen/Cinzel) by Natanael Gama (SIL OFL).
 - **Sound**: synthesised with WebAudio (`src/audio.ts`).
 
 ## Controls
@@ -78,7 +79,7 @@ The game is capped at 60 fps and renders at up to 1.5× device pixels, with MSAA
 
 - The game drops to 20 fps when the window is unfocused and to 10 fps while paused.
 - Between capped frames it sleeps on a timer, so Chrome stops waking on every vsync.
-- The unit portrait and minimap redraw at 30 fps.
+- The minimap redraws at 30 fps. There is no 3D unit portrait, which would need a second WebGL canvas.
 - The audio graph suspends when the tab is hidden.
 - WebGL is created with `powerPreference: 'low-power'`.
 
@@ -92,7 +93,7 @@ src/sim/               deterministic command-driven sim; no Math.random, own tri
 src/ai/bot.ts          seeded command-only bots
 src/render/            Three.js renderer: WC3 tile terrain, glTF models, particles, icons
 src/render/models3d/   warlock and obstacle models (see Art)
-src/ui/hud.ts          WC3 console, command card, shops, minimap, multiboard, tooltips
+src/ui/hud.ts          spell bar, health bar, shops, minimap, multiboard, tooltips
 src/audio.ts           procedural WebAudio sound effects
 src/net/               Trystero session and lobby, lockstep turns, command validation
 src/main.ts            menu, lobby, input, fixed-step/lockstep loop, camera, dev autostart hook

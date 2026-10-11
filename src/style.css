@@ -1,16 +1,13 @@
-@font-face {
-  font-family: 'WC3';
-  src: local('Friz Quadrata TT'), local('Friz Quadrata Std'), local('FrizQuadrataTT');
-}
-
 :root {
   --gold: #ffcc00;
   --gold-dim: #c9a24a;
   --trim-light: #e8c873;
   --trim-dark: #6a4a14;
   --panel: #0d0b08;
-  --font: 'WC3', 'Friz Quadrata TT', 'Trajan Pro', 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
-  --console-h: 196px;
+  --font: 'HudDigits', 'Marcellus', 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
+  /* Height of the spell bar, which the camera and messages keep clear of. */
+  --console-h: 120px;
+  --minimap-top: 190px;
   --topbar-h: 34px;
 }
 
@@ -239,7 +236,7 @@ body {
 .messages {
   position: absolute;
   left: 14px;
-  bottom: calc(var(--console-h) + 70px);
+  bottom: calc(var(--minimap-top) + 44px);
   width: 48%;
   font-size: 15px;
   line-height: 1.3;
@@ -284,8 +281,9 @@ body {
 /* ---------- tooltip ---------- */
 .tooltip {
   position: absolute;
-  right: 8px;
-  bottom: calc(var(--console-h) + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--console-h) + 10px);
   width: 330px;
   padding: 8px 10px;
   background: rgba(0, 0, 0, 0.85);
@@ -324,45 +322,15 @@ body {
   margin-top: 4px;
 }
 
-/* ---------- console ---------- */
-.console {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: var(--console-h);
-  display: flex;
-  align-items: stretch;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px 12px 8px;
-  border-radius: 0;
-  border-left: none;
-  border-right: none;
-  border-bottom: none;
-}
-
-.console::before {
-  /* gold ridge along the top edge */
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: -7px;
-  height: 7px;
-  background: linear-gradient(180deg, #2a1e08, #b08d3c 40%, #f0d68a 55%, #7a5a1c 80%, #1a1206);
-  box-shadow: 0 -2px 4px rgba(0, 0, 0, 0.7);
-}
-
+/* ---------- spell bar & minimap ---------- */
 .minimap-frame {
-  width: 176px;
-  height: 176px;
-  flex: none;
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  width: 168px;
+  height: 168px;
   padding: 3px;
-  background: #000;
-  border: 2px solid var(--trim-dark);
-  box-shadow: inset 0 0 0 1px var(--trim-light), 0 0 0 1px #000;
-  align-self: center;
+  pointer-events: auto;
 }
 
 .minimap-frame canvas {
@@ -371,107 +339,100 @@ body {
   display: block;
 }
 
-.info {
-  flex: 1;
-  max-width: 560px;
+.spellbar {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
   display: flex;
-  gap: 12px;
+  flex-direction: column;
   align-items: stretch;
-}
-
-.portrait-wrap {
-  flex: none;
-  width: 116px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-}
-
-.portrait {
-  width: 108px;
-  height: 128px;
-  border: 2px solid var(--trim-dark);
-  box-shadow: inset 0 0 0 1px var(--trim-light), 0 0 0 1px #000;
-  background: transparent;
-}
-
-.portrait-hp {
-  color: #2ad52a;
-  font-size: 14px;
-  text-align: center;
-}
-
-.unit-info {
-  flex: 1;
-  padding: 8px 14px;
-  background: rgba(0, 0, 0, 0.55);
-  border: 1px solid #3a2e18;
-  box-shadow: inset 0 0 12px #000;
-  font-size: 13px;
-  display: flex;
-  flex-direction: column;
   gap: 5px;
-}
-
-.unit-info .name {
-  font-size: 17px;
-}
-
-.unit-info .cls {
-  color: #ccc;
-  font-size: 12px;
-  margin-top: -4px;
-}
-
-.unit-info .stats {
-  display: grid;
-  grid-template-columns: auto auto;
-  gap: 2px 18px;
-  color: #ddd;
-}
-
-.unit-info .stats span {
-  color: var(--gold);
+  min-width: 260px;
 }
 
 .buffs {
   display: flex;
+  justify-content: center;
+  align-items: center;
   gap: 4px;
-  min-height: 26px;
+  min-height: 24px;
+  font-size: 14px;
 }
 
 .buffs img {
   width: 24px;
   height: 24px;
   border: 1px solid #000;
+  border-radius: 3px;
+}
+
+.hpbar {
+  position: relative;
+  height: 14px;
+  background: rgba(0, 0, 0, 0.7);
+  border: 1px solid #000;
+  box-shadow: 0 0 0 1px var(--trim-dark);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.hp-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background-image: linear-gradient(rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0) 55%, rgba(0, 0, 0, 0.25));
+  transition: width 0.12s linear;
+}
+
+.hp-text {
+  position: absolute;
+  inset: 0;
+  text-align: center;
+  font-size: 11px;
+  line-height: 13px;
 }
 
 .command-card {
-  flex: none;
-  display: grid;
-  grid-template-columns: repeat(4, 54px);
-  grid-template-rows: repeat(3, 54px);
-  gap: 5px;
+  display: flex;
+  justify-content: center;
+  gap: 6px;
   padding: 6px;
-  align-self: center;
-  background: rgba(0, 0, 0, 0.6);
-  border: 2px solid var(--trim-dark);
-  box-shadow: inset 0 0 0 1px #4a3a1a, 0 0 0 1px #000;
+  background: rgba(8, 6, 3, 0.72);
+  border: 1px solid #000;
+  box-shadow: inset 0 0 0 1px var(--trim-dark), 0 2px 8px rgba(0, 0, 0, 0.6);
+  border-radius: 5px;
+  pointer-events: auto;
 }
 
 .cmd {
   position: relative;
-  width: 54px;
-  height: 54px;
+  width: 56px;
+  height: 56px;
   background: #060504 center / cover no-repeat;
   border: 1px solid #000;
-  box-shadow: inset 0 0 6px #000;
+  border-radius: 4px;
+  box-shadow: 0 0 0 1px #5a4520;
+  overflow: hidden;
+  pointer-events: auto;
   cursor: inherit;
 }
 
 .cmd.empty {
-  visibility: hidden;
+  display: none;
+}
+
+.cmd.ready::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(rgba(255, 255, 255, 0.85), rgba(255, 240, 180, 0.25) 60%, rgba(255, 220, 120, 0) 80%);
+  animation: cmd-ready 0.45s ease-out forwards;
+  pointer-events: none;
+}
+
+@keyframes cmd-ready {
+  from { opacity: 1; }
+  to { opacity: 0; }
 }
 
 .cmd:not(.empty):hover {
@@ -486,10 +447,19 @@ body {
   transform: scale(0.94);
 }
 
+.cmd:not(.cooling) .cd {
+  display: none;
+}
+
+.cmd.cooling {
+  filter: saturate(0.3);
+}
+
 .cmd .cd {
   position: absolute;
   inset: 0;
-  background: conic-gradient(rgba(0, 0, 0, 0) calc(var(--p) * 1turn), rgba(0, 0, 0, 0.75) 0);
+  /* The shade sweeps away clockwise, with a bright leading edge. */
+  background: conic-gradient(rgba(0, 0, 0, 0) calc(var(--p) * 1turn - 0.012turn), rgba(255, 236, 170, 0.75) calc(var(--p) * 1turn), rgba(0, 0, 0, 0.6) 0);
   transform: scaleX(-1);
   pointer-events: none;
 }
@@ -511,7 +481,6 @@ body {
   top: 1px;
   font-size: 11px;
   color: var(--gold);
-  font-family: Arial, sans-serif;
   font-weight: bold;
   pointer-events: none;
 }
@@ -524,7 +493,6 @@ body {
   color: #fff;
   background: rgba(0, 0, 0, 0.75);
   padding: 0 3px;
-  font-family: Arial, sans-serif;
   pointer-events: none;
 }
 
@@ -847,7 +815,7 @@ body {
 .chat-input {
   position: absolute;
   left: 14px;
-  bottom: calc(var(--console-h) + 34px);
+  bottom: calc(var(--minimap-top) + 6px);
   width: 40%;
   z-index: 20;
 }

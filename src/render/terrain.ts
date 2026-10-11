@@ -25,6 +25,15 @@ uniform float uBounds;
 uniform vec3 uLight;
 varying vec2 vW;
 
+// Slow, non-repeating mask that picks between two placements of the world texture.
+float gMix;
+
+vec3 worldColor(int type, vec2 w) {
+  vec2 wp = vec2(0.5 / ${WORLD_PX}.0);
+  w = clamp(vec2(w.x, 1.0 - w.y), wp, 1.0 - wp);
+  return texture2D(uWorld, vec2(w.x, (float(type) + w.y) / 3.0)).rgb;
+}
+
 // The atlas supplies each cell's blend mask (alpha); colour comes from a seamless world-space texture.
 vec4 samp(int type, float variation, vec2 f) {
   vec2 cell = variation < 16.0
@@ -36,10 +45,9 @@ vec4 samp(int type, float variation, vec2 f) {
   uv = clamp((cell + uv) * cs, cell * cs + px, (cell + 1.0) * cs - px);
   uv.y = (float(type) + uv.y) / 3.0;
   vec4 t = texture2D(uAtlas, uv);
-  vec2 w = fract(vW / ${(WORLD_TILES * TILE_SIZE).toFixed(1)});
-  vec2 wp = vec2(0.5 / ${WORLD_PX}.0);
-  w = clamp(vec2(w.x, 1.0 - w.y), wp, 1.0 - wp);
-  t.rgb = texture2D(uWorld, vec2(w.x, (float(type) + w.y) / 3.0)).rgb;
+  vec2 a = fract(vW / ${(WORLD_TILES * TILE_SIZE).toFixed(1)});
+  vec2 b = fract(mat2(0.8, -0.6, 0.6, 0.8) * vW / ${(WORLD_TILES * TILE_SIZE * 1.37).toFixed(1)} + vec2(0.37, 0.71));
+  t.rgb = mix(worldColor(type, a), worldColor(type, b), gMix);
   return t;
 }
 
@@ -48,6 +56,9 @@ float baseVariation(float v) {
 }
 
 void main() {
+  float m1 = sin(vW.x * 0.0023 + 1.7 * sin(vW.y * 0.0011)) * sin(vW.y * 0.0029 + 1.3 * sin(vW.x * 0.0013));
+  float m2 = sin(vW.x * 0.0041 - vW.y * 0.0017 + 2.0 * sin(vW.y * 0.0023));
+  gMix = smoothstep(-0.25, 0.25, m1);
   vec2 g = (vW - ${TERRAIN_MIN.toFixed(1)}) / ${TILE_SIZE.toFixed(1)};
   vec2 c = clamp(floor(g), 0.0, ${(TILE_COUNT - 2).toFixed(1)});
   vec2 f = clamp(g - c, 0.0, 1.0);
@@ -72,7 +83,8 @@ void main() {
       color.rgb = mix(color.rgb, t.rgb, t.a);
     }
   }
-  vec3 col = color.rgb * uLight;
+  // Broad light and dark patches, so the ground doesn't read as one flat repeat.
+  vec3 col = color.rgb * uLight * (0.93 + 0.1 * m2);
   // Outside the playable area WC3 draws the black map boundary.
   if (abs(vW.x) > uBounds || abs(vW.y) > uBounds) col *= 0.0;
   gl_FragColor = vec4(col, 1.0);

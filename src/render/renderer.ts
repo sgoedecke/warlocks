@@ -101,23 +101,12 @@ export class GameRenderer {
   private groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   private aoe: THREE.Mesh;
   private selection: THREE.Mesh;
-  private portraitScene = new THREE.Scene();
-  private portraitCam = new THREE.PerspectiveCamera(32, 1, 1, 1000);
-  private portraitModel: WarlockModel | null = null;
-  private portraitColor = -1;
-  private portraitRenderer: THREE.WebGLRenderer;
-  private portraitEl: HTMLElement | null = null;
 
   constructor(private container: HTMLElement, private sim: Sim, public localId: number, gfx: GraphicsOptions = { pixelRatio: 2, antialias: true }) {
     this.renderer = new THREE.WebGLRenderer({ antialias: gfx.antialias, powerPreference: 'low-power' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, gfx.pixelRatio));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(this.renderer.domElement);
-    // The portrait sits inside the opaque console, so it gets its own small canvas.
-    this.portraitRenderer = new THREE.WebGLRenderer({ antialias: gfx.antialias, powerPreference: 'low-power' });
-    this.portraitRenderer.setPixelRatio(Math.min(window.devicePixelRatio, gfx.pixelRatio));
-    this.portraitRenderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.portraitRenderer.domElement.style.display = 'block';
     this.camera = new THREE.PerspectiveCamera(CAM_FOV, 1, 10, 9000);
 
     const canvasTex = (c: HTMLCanvasElement, repeat = false) => {
@@ -181,14 +170,6 @@ export class GameRenderer {
     this.selection.renderOrder = 4;
     this.scene.add(this.selection);
 
-    // Portrait
-    this.portraitScene.background = new THREE.Color(0x050403);
-    const pl = new THREE.DirectionalLight(0xffeedd, 2.4);
-    pl.position.set(100, 120, 60);
-    this.portraitScene.add(pl, new THREE.HemisphereLight(0x8888aa, 0x442200, 1.2));
-    this.portraitCam.position.set(85, 82, 18);
-    this.portraitCam.lookAt(0, 68, 0);
-
     for (const p of sim.players) this.createUnit(p);
     this.resize();
     window.addEventListener('resize', this.onResize);
@@ -199,26 +180,12 @@ export class GameRenderer {
 
   dispose() {
     window.removeEventListener('resize', this.onResize);
-    this.portraitObserver?.disconnect();
     this.renderer.dispose();
     this.renderer.domElement.remove();
-    this.portraitRenderer.dispose();
-    this.portraitRenderer.domElement.remove();
-  }
-
-  attachPortrait(el: HTMLElement) {
-    this.portraitEl = el;
-    el.appendChild(this.portraitRenderer.domElement);
-    this.portraitObserver?.disconnect();
-    this.portraitSize = { w: el.clientWidth, h: el.clientHeight };
-    this.portraitObserver = new ResizeObserver(() => (this.portraitSize = { w: el.clientWidth, h: el.clientHeight }));
-    this.portraitObserver.observe(el);
   }
 
   // Cached so per-frame screen projections don't force a synchronous layout after HUD writes.
   private viewRect = { left: 0, top: 0, width: 1, height: 1 };
-  private portraitSize = { w: 0, h: 0 };
-  private portraitObserver?: ResizeObserver;
 
   resize() {
     const w = this.container.clientWidth;
@@ -964,39 +931,5 @@ export class GameRenderer {
     this.camera.updateMatrixWorld();
 
     this.renderer.render(this.scene, this.camera);
-    this.portraitDt += dt;
-    // The portrait is a small second WebGL canvas; 30 fps is plenty for an idle bust.
-    if (this.portraitDt >= 1 / 30 - 0.002 || dt === 0) {
-      this.renderPortrait(this.portraitDt);
-      this.portraitDt = 0;
-    }
-  }
-
-  private portraitDt = 0;
-
-  private renderPortrait(dt: number) {
-    const el = this.portraitEl;
-    if (!el) return;
-    const { w, h } = this.portraitSize;
-    if (w < 4 || h < 4) return;
-    const pr = this.portraitRenderer;
-    const cur = pr.getSize(new THREE.Vector2());
-    if (cur.x !== w || cur.y !== h) {
-      pr.setSize(w, h);
-      this.portraitCam.aspect = w / h;
-      this.portraitCam.updateProjectionMatrix();
-    }
-    const p = this.sim.players[this.localId];
-    const v = this.units.get(p.id)!;
-    if (this.portraitColor !== p.color) {
-      if (this.portraitModel) this.portraitScene.remove(this.portraitModel.root);
-      this.portraitModel = new WarlockModel(new THREE.Color(PLAYER_COLORS[p.color].css));
-      this.portraitModel.root.rotation.y = 0.35;
-      this.portraitScene.add(this.portraitModel.root);
-      this.portraitColor = p.color;
-    }
-    const m = this.portraitModel!;
-    m.update({ moving: 0, casting: v.casting, knocked: 0, dead: !p.alive, dt });
-    pr.render(this.portraitScene, this.portraitCam);
   }
 }
