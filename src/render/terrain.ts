@@ -1,10 +1,9 @@
 import * as THREE from 'three';
-import { assets } from '../assets/store';
 import { ICE_TILE, MAP_MAX, TERRAIN_MIN, TILE_COUNT, TILE_SIZE } from '../config';
 import type { Sim } from '../sim/game';
 import { ATLAS_H, ATLAS_W, WORLD_PX, WORLD_TILES, proceduralTileAtlas, proceduralWorldTexture } from './tileTextures';
 
-// WC3 ground rendering, ported from the game's (and mdx-m3-viewer's) tile shader:
+// WC3 ground rendering, ported from the game's tile shader:
 // every tile looks at the ground types on its four corner vertices, draws the lowest
 // type as an opaque base and blends each higher type using the atlas cell selected
 // by the bitset of corners that carry it. Layer order follows the map's tile list, in
@@ -22,34 +21,30 @@ const FRAG = /* glsl */ `
 uniform sampler2D uCorners;
 uniform sampler2D uAtlas;
 uniform sampler2D uWorld;
-uniform float uExt[3];
-uniform float uProc[3];
 uniform float uBounds;
 uniform vec3 uLight;
 varying vec2 vW;
 
-vec4 samp(int type, float variation, float ext, vec2 f) {
+// The atlas supplies each cell's blend mask (alpha); colour comes from a seamless world-space texture.
+vec4 samp(int type, float variation, vec2 f) {
   vec2 cell = variation < 16.0
     ? vec2(mod(variation, 4.0), floor(variation / 4.0))
     : vec2(4.0 + mod(variation - 16.0, 4.0), floor((variation - 16.0) / 4.0));
-  vec2 cs = vec2(ext > 0.5 ? 0.125 : 0.25, 0.25);
+  vec2 cs = vec2(0.125, 0.25);
   vec2 uv = vec2(f.x, 1.0 - f.y);
   vec2 px = vec2(0.5 / ${ATLAS_W}.0, 0.5 / ${ATLAS_H}.0);
   uv = clamp((cell + uv) * cs, cell * cs + px, (cell + 1.0) * cs - px);
   uv.y = (float(type) + uv.y) / 3.0;
   vec4 t = texture2D(uAtlas, uv);
-  if (uProc[type] > 0.5) {
-    vec2 w = fract(vW / ${(WORLD_TILES * TILE_SIZE).toFixed(1)});
-    vec2 wp = vec2(0.5 / ${WORLD_PX}.0);
-    w = clamp(vec2(w.x, 1.0 - w.y), wp, 1.0 - wp);
-    t.rgb = texture2D(uWorld, vec2(w.x, (float(type) + w.y) / 3.0)).rgb;
-  }
+  vec2 w = fract(vW / ${(WORLD_TILES * TILE_SIZE).toFixed(1)});
+  vec2 wp = vec2(0.5 / ${WORLD_PX}.0);
+  w = clamp(vec2(w.x, 1.0 - w.y), wp, 1.0 - wp);
+  t.rgb = texture2D(uWorld, vec2(w.x, (float(type) + w.y) / 3.0)).rgb;
   return t;
 }
 
-float baseVariation(float v, float ext) {
-  if (ext > 0.5) return v < 16.0 ? 16.0 + v : (v < 16.5 ? 15.0 : 0.0);
-  return v < 0.5 ? 0.0 : 15.0;
+float baseVariation(float v) {
+  return v < 16.0 ? 16.0 + v : (v < 16.5 ? 15.0 : 0.0);
 }
 
 void main() {
@@ -70,10 +65,10 @@ void main() {
     float bits = (tBR == fk ? 1.0 : 0.0) + (tBL == fk ? 2.0 : 0.0) + (tTR == fk ? 4.0 : 0.0) + (tTL == fk ? 8.0 : 0.0);
     if (bits < 0.5) continue;
     if (first) {
-      color = samp(k, baseVariation(floor(bl.g * 255.0 + 0.5), uExt[k]), uExt[k], f);
+      color = samp(k, baseVariation(floor(bl.g * 255.0 + 0.5)), f);
       first = false;
     } else {
-      vec4 t = samp(k, bits, uExt[k], f);
+      vec4 t = samp(k, bits, f);
       color.rgb = mix(color.rgb, t.rgb, t.a);
     }
   }
@@ -83,75 +78,6 @@ void main() {
   gl_FragColor = vec4(col, 1.0);
   #include <colorspace_fragment>
 }`;
-
-/** Minimal SYLK reader for TerrainArt\\Terrain.slk: returns rows of column-name -> value. */
-function parseSlk(text: string): Record<string, string>[] {
-  const cells = new Map<number, Map<number, string>>();
-  let x = 0, y = 0, maxY = 0;
-  for (const line of text.split(/\r?\n/)) {
-    if (!line.startsWith('C;') && !line.startsWith('F;')) continue;
-    let val: string | undefined;
-    for (const part of line.split(';').slice(1)) {
-      const k = part[0], v = part.slice(1);
-      if (k === 'X') x = +v;
-      else if (k === 'Y') y = +v;
-      else if (k === 'K') val = v.replace(/^"|"$/g, '');
-    }
-    if (line.startsWith('C;') && val !== undefined) {
-      if (!cells.has(y)) cells.set(y, new Map());
-      cells.get(y)!.set(x, val);
-      maxY = Math.max(maxY, y);
-    }
-  }
-  const head = cells.get(1);
-  if (!head) return [];
-  const rows: Record<string, string>[] = [];
-  for (let r = 2; r <= maxY; r++) {
-    const row = cells.get(r);
-    if (!row) continue;
-    const o: Record<string, string> = {};
-    for (const [cx, name] of head) o[name] = row.get(cx) ?? '';
-    rows.push(o);
-  }
-  return rows;
-}
-
-let slkRows: Promise<Map<string, string> | null> | null = null;
-let slkEpoch = -1;
-
-/** Resolves a tile code to its BLP path through Terrain.slk if the base game data is loaded. */
-async function tilePath(code: string): Promise<string | null> {
-  if (!slkRows || slkEpoch !== assets.archiveNames.length) {
-    slkEpoch = assets.archiveNames.length;
-    slkRows = (async () => {
-      const data = await assets.file('TerrainArt\\Terrain.slk');
-      if (!data) return null;
-      const m = new Map<string, string>();
-      for (const r of parseSlk(new TextDecoder('latin1').decode(data))) if (r.tileID) m.set(r.tileID, `${r.dir}\\${r.file}.blp`);
-      return m;
-    })();
-  }
-  return (await slkRows)?.get(code) ?? null;
-}
-
-/** Copies a real tile texture into an atlas strip, nearest-resampling to 64px cells. */
-function blitTile(img: { data: ArrayLike<number>; width: number; height: number }, dst: Uint8Array, strip: number): boolean {
-  const extended = img.width > img.height;
-  const cols = extended ? 8 : 4;
-  const sw = img.width / cols, sh = img.height / 4;
-  for (let y = 0; y < ATLAS_H; y++) for (let x = 0; x < (extended ? ATLAS_W : ATLAS_W / 2); x++) {
-    const cx = Math.floor(x / 64), cy = Math.floor(y / 64);
-    const sx = Math.floor(cx * sw + ((x % 64) + 0.5) * (sw / 64));
-    const sy = Math.floor(cy * sh + ((y % 64) + 0.5) * (sh / 64));
-    const si = (sy * img.width + sx) * 4;
-    const di = ((strip * ATLAS_H + y) * ATLAS_W + x) * 4;
-    dst[di] = img.data[si];
-    dst[di + 1] = img.data[si + 1];
-    dst[di + 2] = img.data[si + 2];
-    dst[di + 3] = img.data[si + 3];
-  }
-  return extended;
-}
 
 export class TerrainView {
   readonly mesh: THREE.Mesh;
@@ -193,8 +119,6 @@ export class TerrainView {
         uCorners: { value: this.corners },
         uAtlas: { value: this.atlas },
         uWorld: { value: this.world },
-        uExt: { value: [1, 1, 1] },
-        uProc: { value: [1, 1, 1] },
         uBounds: { value: MAP_MAX },
         uLight: { value: new THREE.Vector3(1, 1, 1) },
       },
@@ -206,10 +130,10 @@ export class TerrainView {
   }
 
   update(sim: Sim) {
-    const key = `${sim.theme.lava}|${ICE_TILE}|${sim.theme.safe}|${assets.archiveNames.join(',')}`;
+    const key = `${sim.theme.lava}|${ICE_TILE}|${sim.theme.safe}`;
     if (key !== this.atlasKey) {
       this.atlasKey = key;
-      void this.buildAtlas([sim.theme.lava, ICE_TILE, sim.theme.safe], key);
+      this.buildAtlas([sim.theme.lava, ICE_TILE, sim.theme.safe]);
     }
     if (this.version === sim.terrainVersion) return;
     this.version = sim.terrainVersion;
@@ -224,34 +148,13 @@ export class TerrainView {
     this.corners.needsUpdate = true;
   }
 
-  private async buildAtlas(codes: string[], key: string) {
-    const ext = [1, 1, 1];
-    const proc = [1, 1, 1];
+  private buildAtlas(codes: string[]) {
     codes.forEach((c, i) => {
       this.atlasData.set(proceduralTileAtlas(c), i * ATLAS_W * ATLAS_H * 4);
       this.worldData.set(proceduralWorldTexture(c), i * WORLD_PX * WORLD_PX * 4);
     });
-    this.mat.uniforms.uExt.value = ext.slice();
-    this.mat.uniforms.uProc.value = proc.slice();
     this.atlas.needsUpdate = true;
     this.world.needsUpdate = true;
-    if (assets.empty) return;
-    let changed = false;
-    for (let i = 0; i < codes.length; i++) {
-      const path = await tilePath(codes[i]);
-      const tex = path ? await assets.texture(path) : null;
-      if (this.atlasKey !== key) return;
-      const img = tex?.image as { data: ArrayLike<number>; width: number; height: number } | undefined;
-      if (!img?.data) continue;
-      ext[i] = blitTile(img, this.atlasData, i) ? 1 : 0;
-      proc[i] = 0;
-      changed = true;
-    }
-    if (changed) {
-      this.mat.uniforms.uExt.value = ext;
-      this.mat.uniforms.uProc.value = proc;
-      this.atlas.needsUpdate = true;
-    }
   }
 
   dispose() {

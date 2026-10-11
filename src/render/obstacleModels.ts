@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { fbm3, ridged3, clamp01 } from './opentex/noise';
+import { fbm3, ridged3, clamp01 } from './noise';
 import type { Obstacle } from '../sim/types';
 import columnUrl from './models3d/statue_column.glb?url';
 import columnDamagedUrl from './models3d/statue_columnDamaged.glb?url';
@@ -149,6 +149,5 @@ export function obstacleModel(o: Obstacle): THREE.Object3D {
   g.scale.setScalar(KINDS[type].size * o.scale);
   g.rotation.y = o.facing;
   g.position.set(o.x, 0, -o.y);
-  g.userData.shared = true;
   return g;
 }

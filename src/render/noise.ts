@@ -1,4 +1,4 @@
-// Small deterministic noise toolkit for the open texture pack.
+// Small deterministic noise toolkit for the procedural textures.
 
 export function hash3(x: number, y: number, z: number): number {
   let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(z | 0, 1442695041)) | 0;
@@ -55,25 +55,3 @@ export const smooth = (a: number, b: number, v: number) => {
   const t = clamp01((v - a) / (b - a));
   return t * t * (3 - 2 * t);
 };
-export const mix = (a: number, b: number, t: number) => a + (b - a) * t;
-
-export type RGB = [number, number, number];
-
-export function hex(c: string): RGB {
-  const n = parseInt(c.replace('#', ''), 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-}
-
-/** Samples a colour ramp of [position, colour] stops (0..1, 0..255). */
-export function ramp(stops: [number, RGB][], t: number): RGB {
-  if (t <= stops[0][0]) return stops[0][1];
-  for (let i = 1; i < stops.length; i++) {
-    if (t <= stops[i][0]) {
-      const [p0, c0] = stops[i - 1];
-      const [p1, c1] = stops[i];
-      const f = (t - p0) / (p1 - p0 || 1);
-      return [mix(c0[0], c1[0], f), mix(c0[1], c1[1], f), mix(c0[2], c1[2], f)];
-    }
-  }
-  return stops[stops.length - 1][1];
-}

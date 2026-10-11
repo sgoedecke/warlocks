@@ -8,11 +8,9 @@ import type { Command, GameEvent, PlayerSetup, SimRules } from './sim/types';
 import { GameRenderer } from './render/renderer';
 import { loadUnitModels } from './render/unitModel';
 import { loadObstacleModels } from './render/obstacleModels';
-import { loadRealIcons, makeCursor } from './render/textures';
-import { Hud, playerName, SHOP_ICON_PATHS } from './ui/hud';
+import { makeCursor } from './render/textures';
+import { Hud, playerName } from './ui/hud';
 import { SoundSystem, type Sfx } from './audio';
-import { initAssets, onAssetStatus } from './assets/loader';
-import { clearMdxCache } from './render/mdx';
 import { BUFFER_TICKS, HASH_EVERY, hashString, type Lockstep } from './net/lockstep';
 import { workerInterval } from './net/timer';
 import { MAX_PLAYERS, NetSession, normalizeCode, PUBLIC_ROOMS, type LobbyState, type NetRules, type StartInfo } from './net/session';
@@ -441,15 +439,13 @@ class Game {
         sound.playAt('death', e.x, e.y);
         break;
       case 'announcement':
-        if (e.soundPath) sound.playFile(e.soundPath, 'horn', 0.9);
-        else sound.play('horn', 0.9);
+        sound.play('horn', 0.9);
         break;
       case 'effect':
-        if (e.soundPath) sound.playFile(e.soundPath, 'reflect', 1, e);
+        if (e.soundPath) sound.playAt('reflect', e.x, e.y);
         break;
       case 'reflect':
-        if (e.soundPath) sound.playFile(e.soundPath, 'reflect', 1, e);
-        else sound.playAt('reflect', e.x, e.y);
+        sound.playAt('reflect', e.x, e.y);
         break;
       case 'bounty':
         if (e.pid === this.localId) sound.play('bounty', 0.8);
@@ -800,15 +796,8 @@ function startGame(name: string, bots: number, rules?: Partial<SimRules>, dev?: 
   return game;
 }
 
-let iconsLoading: Promise<void> = Promise.resolve();
-onAssetStatus(() => {
-  clearMdxCache();
-  iconsLoading = loadRealIcons(SHOP_ICON_PATHS);
-});
-
 async function boot() {
-  await Promise.all([initAssets(), loadUnitModels(), loadObstacleModels()]);
-  await iconsLoading;
+  await Promise.all([loadUnitModels(), loadObstacleModels()]);
   const joinCode = new URLSearchParams(location.search).get('join');
   if (joinCode) {
     const name = new URLSearchParams(location.search).get('name');

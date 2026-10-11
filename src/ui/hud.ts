@@ -59,11 +59,6 @@ const MERCHANT_ICONS = {
   lifestealMastery: 'ReplaceableTextures\\PassiveButtons\\PASBTNMagicImmunity.blp',
   aoeMastery: 'ReplaceableTextures\\PassiveButtons\\PASBTNScatterRockets.blp',
 };
-export const SHOP_ICON_PATHS = [
-  ...Object.values(SHOP_LAYOUT).map((p) => p.icon), ...Object.values(MERCHANT_ICONS),
-  `${BTN}BTNHumanCaptureFlag.blp`, `${BTN}BTNHire.blp`,
-];
-
 // Per-frame HUD writes go through these so unchanged values don't invalidate style and layout.
 const lastText = new WeakMap<Element, string>();
 const lastHtml = new WeakMap<Element, string>();

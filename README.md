@@ -25,30 +25,16 @@ Every push to `master` builds the site and deploys it to GitHub Pages (`.github/
 - Kill announcements follow the original priority (First Blood, then multikills within 9s, then sprees from 3 to 10 kills), each with its announcer line.
 - All normally obtainable spells are represented: Fireball, Scourge, Lightning, Homing, Boomerang, Meteor, Splitter, Wind Walk, Teleport, Thrust, Displacement, Drain, Fire Spray, Bouncer, Shield, Time Shift, Rush, Freeze, Gravity, and Link.
 
-## Original assets
+## Art
 
-The repository contains no Blizzard or map assets. Instead the game reads them in the browser from files you supply, and keeps them in IndexedDB so you only add them once. Nothing is uploaded anywhere.
+Everything is drawn in code or comes from openly licensed models; the repository contains no Blizzard assets.
 
-On the main menu, drop files onto the **Original assets** panel (or click **Add files…**):
-
-- **The Warlock 0.88b map** (`.w3m`). This provides the warlock model (`BloodelfWizard`), the map's custom effects (fire spray, boomerang, meteor and lightning-combo explosions), the Rain of Fire icon and the announcer voice lines.
-- **Optionally, `war3.mpq`, `War3x.mpq` and `War3Patch.mpq`** from a classic (1.26 or earlier) install. These provide everything the map borrows from the base game: missile and spell effect models, obstacle doodads, terrain tiles, unit textures and command button icons. Reforged's CASC storage isn't supported.
-
-Anything that isn't available is drawn procedurally, so the game is fully playable with no files at all. The map file on its own is enough for the original look, because of the open texture pack below. In dev builds, `reference/Warlock088bhotfix.w3m` is loaded automatically if present.
-
-The browser-side pipeline is in `src/assets/` (MPQ reader with zlib and bzip2 support, BLP and MDX parsing via `mdx-m3-viewer`'s parsers) and `src/render/mdx/` (a Three.js MDX renderer: CPU skinning, geoset/material/texture animation, team colour, particle emitters and ribbons). Terrain uses a port of WC3's ground tile shader (`src/render/terrain.ts`), which picks atlas cells from the tile types at each tile's four corners. That's why the lava edge steps tile by tile like the original.
-
-Limitations: files stored with MPQ's PKWARE implode or ADPCM/Huffman compression (used for some base-game `.wav` sounds) can't be decoded yet, and spell sounds triggered by model events aren't played.
-
-### Open texture pack
-
-The map's models borrow all of their textures from the base game. `src/render/opentex/` replaces them with original, MIT-licensed art, generated in code at load time. Whenever a texture isn't in the loaded archives, the renderer uses the matching generator:
-
-- **Effect textures** (`particles.ts`). About 55 generators, keyed by the original texture path: fire, smoke and swirl flipbooks laid out on the same 8×8 grids, glows, stars, flares, shockwaves, lightning, frost, water and so on. Particle emitters use WC3's own sprite-sheet cell rules, so the flipbooks animate the same way the originals do.
-- **Unit skins** (`bake.ts`). These are baked directly onto each model's UV layout from its 3D geometry: robes, gold trim, pauldrons, hood, armour pads and copper staff. Shading uses each texel's position, normal and distance to the UV seam. The pauldrons, hood and tabard leave the team-colour layer showing through, as the originals do.
-- **Command button icons** (`icons.ts`). Canvas-painted icons for every spell, item, upgrade and menu button.
-
-`noise.ts` holds the shared tileable noise and colour helpers. To view the pack, use `dev/opentex.html` (add `?dark`, or `?bake=BloodelfWizard.mdx`) and `dev/icons.html`. Real textures from the MPQs always take precedence.
+- **Warlock**: [Animated Wizard](https://poly.pizza/m/kttbFvCl2C) by Quaternius ([CC-BY 3.0](https://creativecommons.org/licenses/by/3.0/)). The texture is recoloured per team at load, and only the clips the game uses are kept; the texture is resized to 512² JPEG.
+- **Obstacles**: columns, rock pillars and trees from Kenney's [Nature Kit](https://kenney.nl/assets/nature-kit) (CC0). They are recoloured for each tileset and given procedural painted detail textures with box-projected UVs (`src/render/obstacleModels.ts`).
+- **Terrain**: procedural tile textures (`src/render/tileTextures.ts`) drawn with a port of WC3's ground tile shader (`src/render/terrain.ts`), which picks atlas cells from the tile types at each tile's four corners. That's why the lava edge steps tile by tile like the original.
+- **Effects**: point-sprite particles, with fire and smoke using procedural 8×8 cloud flipbooks (`src/render/clouds.ts`).
+- **Command button icons**: canvas-painted icons for every spell, item, upgrade and menu button (`src/render/icons.ts`).
+- **Sound**: synthesised with WebAudio (`src/audio.ts`).
 
 ## Controls
 
@@ -94,35 +80,31 @@ The game is capped at 60 fps and renders at up to 1.5× device pixels, with MSAA
 - The game drops to 20 fps when the window is unfocused and to 10 fps while paused.
 - Between capped frames it sleeps on a timer, so Chrome stops waking on every vsync.
 - The unit portrait and minimap redraw at 30 fps.
-- The audio graph suspends when the volume is 0 or the tab is hidden.
+- The audio graph suspends when the tab is hidden.
 - WebGL is created with `powerPreference: 'low-power'`.
 
-MDX models are skinned on the GPU. Each instance uploads one palette of averaged matrix-group matrices, deduplicated across geosets, as vertex uniforms. Geometry is shared by all instances of a model, and particle and ribbon buffers are persistent. Dev autostart accepts `fps=`, `res=` and `aa=0|1` overrides for benchmarking.
+Obstacle geometry and materials are shared by every instance. Dev autostart accepts `fps=`, `res=` and `aa=0|1` overrides for benchmarking.
 
 ## Architecture
 
 ```
-src/config.ts          0.88b constants, spell/shop/item metadata, original asset paths
+src/config.ts          0.88b constants, spell/shop/item metadata
 src/sim/               deterministic command-driven sim; no Math.random, own trig (dmath.ts)
 src/ai/bot.ts          seeded command-only bots
-src/assets/            MPQ/BLP/MDX loading from user-supplied archives
-src/render/            Three.js renderer: WC3 tile terrain, MDX models, procedural fallbacks
-src/render/opentex/    open-source replacement textures, skins and icons
+src/render/            Three.js renderer: WC3 tile terrain, glTF models, particles, icons
+src/render/models3d/   warlock and obstacle models (see Art)
 src/ui/hud.ts          WC3 console, command card, shops, minimap, multiboard, tooltips
-src/audio.ts           original sound files when available, procedural WebAudio otherwise
+src/audio.ts           procedural WebAudio sound effects
 src/net/               Trystero session and lobby, lockstep turns, command validation
 src/main.ts            menu, lobby, input, fixed-step/lockstep loop, camera, dev autostart hook
 scripts/simtest.ts     deterministic headless verification
-dev/mdxview.html       dev-only model viewer (?focus=Model.mdx&seq=&yaw=&d=&h=&at=ms)
-dev/opentex.html       dev-only gallery of the open texture pack
-dev/icons.html         dev-only gallery of the open command icons
 ```
 
-The sim runs in lockstep: all mutation enters through `Command` objects (`move`, `stop`, `cast`, `buy`, `sell`, `ready`, `toggle`, `leave`) and all randomness uses `Rng`. Sim events carry the original model and sound paths (e.g. `war3mapImported\\CFirstBlood.mp3`), and the renderer and audio look those up in the loaded archives.
+The sim runs in lockstep: all mutation enters through `Command` objects (`move`, `stop`, `cast`, `buy`, `sell`, `ready`, `toggle`, `leave`) and all randomness uses `Rng`.
 
 ## Known deviations / skipped 0.88b features
 
 - Avatar/Ghost modes, custom terrain editor commands, contributor skins, the Fireball colour chat command, the `-ulti` Spells 3 shop (Pious, Magma and an empty Shield copy) and the Cataclysm/Torrent Scourge variants are not implemented.
 - WC3 pathing/cast-order semantics are approximated by deterministic turning plus `h000` cast point/back-swing timing.
 - Projectile/warlock collision is swept for fast movers, but complex JASS callback ordering is approximated where it would not change normal play outcomes.
-- Without the base-game MPQs, base-game textures come from the open texture pack. It is a lookalike, not a pixel copy. Base-game *models* (missiles such as the fireball dragon, and obstacle doodads) are still drawn with simple procedural meshes.
+- The art is a lookalike, not the original: the warlock and obstacles are stand-in models, missiles are particle effects rather than WC3's missile models, and there are no announcer voice lines.

@@ -1,12 +1,10 @@
 import * as THREE from 'three';
-import { MODEL_PATHS, PLAYER_COLORS, SPELLS, WARLOCK_RADIUS } from '../config';
+import { PLAYER_COLORS, WARLOCK_RADIUS } from '../config';
 import type { Sim } from '../sim/game';
 import type { GameEvent, Obstacle, Projectile, ProjectileKind, Warlock } from '../sim/types';
 import { ParticleSystem, type ParticleSpec } from './particles';
-import { openTextureCanvas } from './opentex/particles';
+import { cloudFlipbook } from './clouds';
 import { makeGlowTexture, makeRingTexture, makeScorchTexture, makeShadowTexture } from './textures';
-import { ModelLibrary } from './models';
-import type { MdxInstance } from './mdx';
 import { TerrainView } from './terrain';
 import { obstacleModel } from './obstacleModels';
 import { WarlockModel } from './unitModel';
@@ -17,8 +15,6 @@ const CAM_FOV = 48;
 // Missile art is attached to the e000 dummy, whose fly height is 65.
 const PROJ_HEIGHT = 65;
 // h000 'Warlock': BloodelfWizard.mdl at usca 0.92.
-const WARLOCK_MODEL = 'BloodelfWizard.mdl';
-const WARLOCK_SCALE = 0.92;
 // WC3 heroes are drawn noticeably larger than their collision size.
 const UNIT_SCALE = 1.45;
 
@@ -49,9 +45,6 @@ function disposeObj(obj: THREE.Object3D) {
 
 interface UnitView {
   model: WarlockModel;
-  mdx: MdxInstance | null;
-  seq: string;
-  spellT: number;
   shadow: THREE.Mesh;
   bubble: THREE.Mesh;
   moving: number;
@@ -65,7 +58,6 @@ interface UnitView {
 
 interface ProjView {
   obj: THREE.Group;
-  mdx: MdxInstance | null;
   kind: ProjectileKind;
   carry: number;
   chain?: THREE.Mesh;
@@ -93,8 +85,7 @@ export class GameRenderer {
   camDist = 1650;
   private shake = 0;
   private terrain = new TerrainView();
-  readonly lib: ModelLibrary;
-  private obstacleViews: { obs: Obstacle; obj: THREE.Object3D; mdx: boolean }[] = [];
+  private obstacleViews: { obs: Obstacle; obj: THREE.Object3D }[] = [];
   private obstacleSet: Obstacle[] | null = null;
   private units = new Map<number, UnitView>();
   private projs = new Map<number, ProjView>();
@@ -113,8 +104,6 @@ export class GameRenderer {
   private portraitScene = new THREE.Scene();
   private portraitCam = new THREE.PerspectiveCamera(32, 1, 1, 1000);
   private portraitModel: WarlockModel | null = null;
-  private portraitMdx: MdxInstance | null = null;
-  private portraitSeq = '';
   private portraitColor = -1;
   private portraitRenderer: THREE.WebGLRenderer;
   private portraitEl: HTMLElement | null = null;
@@ -169,12 +158,10 @@ export class GameRenderer {
     this.scene.add(new THREE.AmbientLight(0x403030, 0.8));
 
     this.scene.add(this.terrain.mesh);
-    this.lib = new ModelLibrary(this.scene);
-    this.lib.preload([WARLOCK_MODEL, 'fb2.mdl', ...Object.values(MODEL_PATHS), ...Object.values(SPELLS).map((s) => s.modelPath)]);
 
     this.fx = new ParticleSystem(3000, this.tex.glow, true);
-    this.fire = new ParticleSystem(2000, canvasTex(openTextureCanvas('textures\\clouds8x8.blp', 8, 8)!), true, 8);
-    this.smoke = new ParticleSystem(2000, canvasTex(openTextureCanvas('textures\\clouds8x8fade.blp', 8, 8)!), false, 8);
+    this.fire = new ParticleSystem(2000, canvasTex(cloudFlipbook('white')), true, 8);
+    this.smoke = new ParticleSystem(2000, canvasTex(cloudFlipbook('fade')), false, 8);
     this.scene.add(this.fx.points, this.fire.points, this.smoke.points);
 
     this.aoe = new THREE.Mesh(
@@ -304,7 +291,7 @@ export class GameRenderer {
     );
     bubble.visible = false;
     this.scene.add(model.root, shadow, bubble);
-    this.units.set(p.id, { model, mdx: null, seq: '', spellT: 0, shadow, bubble, moving: 0, casting: 0, knocked: 0, flash: 0, deadT: 0, emitCarry: 0, wasAlive: true });
+    this.units.set(p.id, { model, shadow, bubble, moving: 0, casting: 0, knocked: 0, flash: 0, deadT: 0, emitCarry: 0, wasAlive: true });
   }
 
   private updateUnits(alpha: number, dt: number) {
@@ -316,7 +303,6 @@ export class GameRenderer {
       const m = v.model;
       if (p.left) {
         m.root.visible = false;
-        if (v.mdx) v.mdx.visible = false;
         v.shadow.visible = v.bubble.visible = false;
         continue;
       }
@@ -334,30 +320,9 @@ export class GameRenderer {
       v.knocked += (Math.min(1, kbSpeed / 450) - v.knocked) * k;
       v.flash = Math.max(0, v.flash - dt * 5);
 
-      if (!v.mdx) {
-        v.mdx = this.lib.instance(WARLOCK_MODEL);
-        if (v.mdx) {
-          v.mdx.scale.setScalar(WARLOCK_SCALE);
-          v.mdx.teamColor = new THREE.Color(PLAYER_COLORS[p.color].css);
-          this.scene.add(v.mdx);
-          v.seq = '';
-        }
-      }
       m.root.position.set(x, p.inLava ? -6 : 0, -y);
       m.root.rotation.y = facing;
-      if (v.mdx) {
-        m.root.visible = false;
-        v.spellT -= dt;
-        const want = !p.alive ? 'death' : v.spellT > 0 ? 'spell' : v.moving > 0.5 || p.thrust ? 'walk' : 'stand';
-        if (want !== v.seq) {
-          v.mdx.setSequence(want, want === 'stand' || want === 'walk');
-          v.seq = want;
-        }
-        v.mdx.position.set(x, 0, -y);
-        v.mdx.rotation.y = facing;
-      } else {
-        m.update({ moving: v.moving, casting: v.casting, knocked: v.knocked, dead: !p.alive, dt });
-      }
+      m.update({ moving: v.moving, casting: v.casting, knocked: v.knocked, dead: !p.alive, dt });
 
       let opacity = 1;
       let visible = true;
@@ -370,13 +335,8 @@ export class GameRenderer {
         if (p.id === this.localId) opacity = 0.4;
         else visible = false;
       }
-      if (v.mdx) {
-        v.mdx.visible = visible;
-        v.mdx.opacity = p.alive ? opacity : 1;
-      } else {
-        m.root.visible = visible;
-        m.setOpacity(opacity);
-      }
+      m.root.visible = visible;
+      m.setOpacity(opacity);
       if (p.inLava && p.alive) m.setTint(new THREE.Color(1, 0.3, 0.05), 0.35 + 0.15 * Math.sin(this.time * 12));
       else if (v.flash > 0) m.setTint(new THREE.Color(1, 1, 1), v.flash * 0.6);
       else if (!p.alive) m.setTint(new THREE.Color(0.1, 0.05, 0.05), Math.min(1, v.deadT));
@@ -467,21 +427,7 @@ export class GameRenderer {
 
   private createProj(pr: Projectile): ProjView {
     const g = new THREE.Group();
-    const v: ProjView = { obj: g, kind: pr.kind, carry: 0, mdx: null };
-    const mdx = this.lib.instance(pr.modelPath);
-    if (mdx) {
-      // The missile art is an effect on the dummy's origin; it loops Stand (or Birth if that's all it has).
-      v.mdx = mdx;
-      mdx.scale.setScalar(pr.scale || 1);
-      mdx.setSequence(mdx.model.hasSequence('stand') ? 'stand' : 'birth', true);
-      g.add(mdx);
-      if (pr.kind === 'link') {
-        v.chain = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshLambertMaterial({ color: 0x707080, side: THREE.DoubleSide }));
-        this.scene.add(v.chain);
-      }
-      this.scene.add(g);
-      return v;
-    }
+    const v: ProjView = { obj: g, kind: pr.kind, carry: 0 };
     switch (pr.kind) {
       case 'fireball':
         g.add(this.sprite(0xff6010, 90), this.sprite(0xffc040, 44), this.sprite(0xffffff, 18, this.tex.hardGlow));
@@ -547,10 +493,9 @@ export class GameRenderer {
       v.obj.position.set(x, h, -y);
       const heading = Math.atan2(pr.vy, pr.vx);
       v.obj.rotation.y = heading;
-      if (v.mdx) v.obj.rotation.y = heading;
       const spin = v.obj.getObjectByName('spin');
       if (spin) spin.rotation.y += dt * 28;
-      if (pr.kind === 'gravity' && !v.mdx) v.obj.children[0].scale.setScalar(150 + Math.sin(this.time * 8) * 15);
+      if (pr.kind === 'gravity') v.obj.children[0].scale.setScalar(150 + Math.sin(this.time * 8) * 15);
 
       if (v.chain) {
         const owner = this.sim.players[pr.owner];
@@ -562,7 +507,6 @@ export class GameRenderer {
 
       v.carry += dt;
       const z = -y;
-      if (v.mdx) v.carry = 0;
       while (v.carry > 1 / 60) {
         v.carry -= 1 / 60;
         const jx = rand(-5, 5);
@@ -597,13 +541,6 @@ export class GameRenderer {
     }
     for (const [id, v] of this.projs) {
       if (!seen.has(id)) {
-        if (v.mdx) {
-          // DestroyEffect on the missile art plays its Death animation where it was.
-          const pos = v.mdx.getWorldPosition(new THREE.Vector3());
-          const m = v.mdx;
-          this.lib.release(m);
-          if (m.model.hasSequence('death')) this.lib.spawnEffect(m.model.path, pos, { scale: m.scale.x, facing: v.obj.rotation.y, sequence: 'death', ttl: 3 });
-        }
         this.scene.remove(v.obj);
         disposeObj(v.obj);
         if (v.chain) {
@@ -793,50 +730,7 @@ export class GameRenderer {
     this.shake = Math.max(this.shake, 22 * Math.max(0, 1 - d / 1500));
   }
 
-  /** Plays the event's real WC3 effect model if it's loaded; false means draw the procedural fallback. */
-  private modelFx(e: GameEvent): boolean {
-    const at = (path: string, x: number, y: number, h = 0, scale = 1) => this.lib.spawnEffect(path, sim2three(x, y, h), { scale }) !== null;
-    switch (e.t) {
-      case 'effect':
-        if (e.name === 'shield') return false;
-        if (e.name === 'thrustAfterimage' || e.name === 'timeshiftDummy') {
-          const inst = this.lib.spawnEffect(e.modelPath, sim2three(e.x, e.y, 0), { scale: e.scale, sequence: 'walk', fade: e.name === 'thrustAfterimage' ? 0.4 : 1.5 });
-          if (inst) inst.opacity = 0.5;
-          return inst !== null;
-        }
-        return at(e.modelPath, e.x, e.y, 0, e.scale);
-      case 'explode':
-        return at(e.modelPath, e.x, e.y, 0, e.scale);
-      case 'teleport':
-        return at(e.modelPath, e.fx, e.fy) && at(e.modelPath, e.tx, e.ty);
-      case 'swap':
-        return at(e.modelPath, e.ax, e.ay) && at(e.modelPath, e.bx, e.by);
-      case 'meteorImpact':
-      case 'thrustHit':
-      case 'death':
-        return at(e.modelPath, e.x, e.y);
-      case 'reflect':
-        return at(e.modelPath, e.x, e.y, PROJ_HEIGHT);
-      default:
-        return false;
-    }
-  }
-
   onEvent(e: GameEvent) {
-    if (e.t === 'cast') {
-      const v = this.units.get(e.pid);
-      if (v) {
-        v.spellT = 0.6;
-        v.seq = '';
-      }
-    }
-    if (this.modelFx(e)) {
-      if (e.t === 'meteorImpact') {
-        const d = Math.hypot(e.x - this.camX, e.y - this.camY);
-        this.shake = Math.max(this.shake, 22 * Math.max(0, 1 - d / 1500));
-      }
-      return;
-    }
     switch (e.t) {
       case 'cast': {
         const p = this.sim.players[e.pid];
@@ -928,42 +822,15 @@ export class GameRenderer {
 
   // ---------- obstacles ----------
 
-  private obstacleObject(o: Obstacle): { obj: THREE.Object3D; mdx: boolean } {
-    const inst = this.lib.instance(o.modelPath);
-    if (inst) {
-      inst.setSequence('stand', true);
-      inst.scale.setScalar(o.scale);
-      inst.rotation.y = o.facing;
-      inst.position.set(o.x, 0, -o.y);
-      return { obj: inst, mdx: true };
-    }
-    return { obj: obstacleModel(o), mdx: false };
-  }
-
   private updateObstacles() {
-    if (this.obstacleSet !== this.sim.obstacles) {
-      for (const v of this.obstacleViews) this.removeObstacleView(v);
-      this.obstacleSet = this.sim.obstacles;
-      this.obstacleViews = this.sim.obstacles.map((obs) => {
-        const v = { obs, ...this.obstacleObject(obs) };
-        this.scene.add(v.obj);
-        return v;
-      });
-    }
-    for (const v of this.obstacleViews) {
-      if (v.mdx || !this.lib.get(v.obs.modelPath)) continue;
-      this.removeObstacleView(v);
-      Object.assign(v, this.obstacleObject(v.obs));
-      this.scene.add(v.obj);
-    }
-  }
-
-  private removeObstacleView(v: { obj: THREE.Object3D; mdx: boolean }) {
-    if (v.mdx) this.lib.release(v.obj as MdxInstance);
-    else {
-      this.scene.remove(v.obj);
-      if (!v.obj.userData.shared) disposeObj(v.obj);
-    }
+    if (this.obstacleSet === this.sim.obstacles) return;
+    for (const v of this.obstacleViews) this.scene.remove(v.obj);
+    this.obstacleSet = this.sim.obstacles;
+    this.obstacleViews = this.sim.obstacles.map((obs) => {
+      const obj = obstacleModel(obs);
+      this.scene.add(obj);
+      return { obs, obj };
+    });
   }
 
   // ---------- frame ----------
@@ -997,7 +864,6 @@ export class GameRenderer {
     this.camera.position.set(target.x, Math.sin(CAM_PITCH) * this.camDist, target.z + Math.cos(CAM_PITCH) * this.camDist);
     this.camera.lookAt(target);
     this.camera.updateMatrixWorld();
-    this.lib.update(dt, this.camera);
 
     this.renderer.render(this.scene, this.camera);
     this.portraitDt += dt;
@@ -1024,37 +890,6 @@ export class GameRenderer {
     }
     const p = this.sim.players[this.localId];
     const v = this.units.get(p.id)!;
-    if (!this.portraitMdx) {
-      const model = this.lib.get(WARLOCK_MODEL);
-      if (model) {
-        // No BloodelfWizard_portrait in the map, so like WC3 we frame the unit model's head.
-        this.portraitMdx = model.createInstance();
-        this.portraitMdx.rotation.y = 0.5;
-        this.portraitScene.add(this.portraitMdx);
-        if (this.portraitModel) this.portraitModel.root.visible = false;
-        this.portraitColor = -1;
-      }
-    }
-    if (this.portraitMdx) {
-      const pm = this.portraitMdx;
-      if (this.portraitColor !== p.color) {
-        pm.teamColor = new THREE.Color(PLAYER_COLORS[p.color].css);
-        this.portraitColor = p.color;
-        // BloodelfWizard's head sits at ~118 model units and it faces +X.
-        this.portraitCam.position.set(95, 124, 0);
-        this.portraitCam.fov = 30;
-        this.portraitCam.updateProjectionMatrix();
-        this.portraitCam.lookAt(0, 112, 0);
-      }
-      const want = !p.alive ? 'death' : v.seq === 'spell' ? 'spell' : 'stand';
-      if (want !== this.portraitSeq) {
-        pm.setSequence(want, want === 'stand');
-        this.portraitSeq = want;
-      }
-      pm.update(dt, this.portraitCam);
-      pr.render(this.portraitScene, this.portraitCam);
-      return;
-    }
     if (this.portraitColor !== p.color) {
       if (this.portraitModel) this.portraitScene.remove(this.portraitModel.root);
       this.portraitModel = new WarlockModel(new THREE.Color(PLAYER_COLORS[p.color].css));

@@ -1,6 +1,5 @@
-import { ALL_SPELLS, ITEMS, SPELLS, type SpellId } from '../config';
-import { assets } from '../assets/store';
-import { paintOpenIcon } from './opentex/icons';
+import { SPELLS, type SpellId } from '../config';
+import { paintOpenIcon } from './icons';
 
 // ---------- noise helpers ----------
 function hash(x: number, y: number, seed: number): number {
@@ -143,46 +142,10 @@ function bevel(g: CanvasRenderingContext2D, s: number) {
 
 const iconCache = new Map<string, string>();
 
-const realIcons = new Map<string, HTMLCanvasElement>();
 const iconKey = (path: string) => path.toLowerCase().replace(/\//g, '\\');
 
-/** Loads the original BTN icons that are present in the user's archives. */
-export async function loadRealIcons(extraPaths: string[] = []): Promise<void> {
-  realIcons.clear();
-  iconCache.clear();
-  const paths = new Set([...ALL_SPELLS.map((id) => SPELLS[id].icon), ...Object.values(ITEMS).map((i) => i.icon), ...extraPaths]);
-  await Promise.all([...paths].map(async (path) => {
-    if (!assets.has(path)) return;
-    const tex = await assets.texture(path);
-    const img = tex?.image as { data: Uint8ClampedArray | Uint8Array; width: number; height: number } | undefined;
-    if (!img?.data) return;
-    const c = document.createElement('canvas');
-    c.width = img.width;
-    c.height = img.height;
-    c.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(img.data), img.width, img.height), 0, 0);
-    realIcons.set(iconKey(path), c);
-  }));
-  iconCache.clear();
-}
-
-function realIconUrl(path: string, size: number): string | null {
-  const real = realIcons.get(iconKey(path));
-  if (!real) return null;
-  const key = `${iconKey(path)}:${size}`;
-  let url = iconCache.get(key);
-  if (!url) {
-    const [c, g] = makeCanvas(size, size);
-    g.drawImage(real, 0, 0, size, size);
-    url = c.toDataURL();
-    iconCache.set(key, url);
-  }
-  return url;
-}
-
-/** A command button icon by its WC3 path: the original if loaded, else a generic stand-in. */
+/** A command button icon by its WC3 path: an open painted version, else a generic stand-in. */
 export function btnIcon(path: string, size = 64): string {
-  const real = realIconUrl(path, size);
-  if (real) return real;
   const key = `btn:${iconKey(path)}:${size}`;
   let url = iconCache.get(key);
   if (!url) {
@@ -208,8 +171,6 @@ export function btnIcon(path: string, size = 64): string {
 }
 
 export function spellIcon(id: SpellId, size = 64): string {
-  const real = realIconUrl(SPELLS[id].icon, size);
-  if (real) return real;
   const key = `${id}:${size}`;
   let url = iconCache.get(key);
   if (!url) {
