@@ -617,6 +617,97 @@ export class GameRenderer {
     });
   }
 
+  /** A flat additive ring on the ground that grows from r0 to r1 and fades. */
+  private groundRing(x: number, y: number, r0: number, r1: number, color: number, life: number, tex = this.tex.thickRing, opacity = 1) {
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      new THREE.MeshBasicMaterial({ map: tex, color, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity }),
+    );
+    m.rotation.x = -Math.PI / 2;
+    m.position.set(x, 2, -y);
+    m.renderOrder = 5;
+    this.addTransient(m, life, (t) => {
+      const e = 1 - (1 - t) * (1 - t);
+      m.scale.setScalar(r0 + (r1 - r0) * e);
+      (m.material as THREE.MeshBasicMaterial).opacity = opacity * (1 - t);
+    });
+  }
+
+  /** Procedural stand-ins for the map's effect models (dark portal, novas, war stomp, frost...). */
+  private effect(name: string, x: number, y: number) {
+    switch (name) {
+      case 'scourge': {
+        // Dark red blast swirling outward from the caster to the 250 radius.
+        this.groundRing(x, y, 30, 260, 0xff3010, 0.45);
+        this.flash(x, y, 50, 0xff4010, 260, 0.25);
+        for (let i = 0; i < 36; i++) {
+          const a = (i / 36) * Math.PI * 2 + rand(-0.1, 0.1);
+          const sp = rand(380, 520);
+          this.fire.emit({ x: x + Math.cos(a) * 25, y: rand(20, 60), z: -y + Math.sin(a) * 25, vx: Math.cos(a) * sp - Math.sin(a) * 120, vy: rand(20, 80), vz: Math.sin(a) * sp + Math.cos(a) * 120, life: 0.45, size: 55, endSize: 20, color: 0xff6020, endColor: 0x600010, drag: 3 });
+        }
+        this.burst(x, y, 30, 12, { speed: 260, color: 0x2a0a10, size: 50, endSize: 110, life: 0.9, drag: 3, alpha: 0.5 }, this.smoke);
+        break;
+      }
+      case 'scourgeNova':
+        this.groundRing(x, y, 20, 250, 0xffd040, 0.35, this.tex.ring);
+        break;
+      case 'lightningFireballCombo':
+        this.burst(x, y, PROJ_HEIGHT, 60, { speed: 600, color: 0xffd060, endColor: 0xc02000, size: 70, endSize: 18, life: 0.6, drag: 3 }, this.fire);
+        this.burst(x, y, PROJ_HEIGHT, 30, { speed: 500, color: 0xd0e8ff, endColor: 0x3060ff, size: 18, endSize: 4, life: 0.4 });
+        this.burst(x, y, 40, 16, { speed: 200, color: 0x2a2220, size: 60, endSize: 140, life: 1.3, drag: 2, vy: 60, alpha: 0.55 }, this.smoke);
+        this.flash(x, y, PROJ_HEIGHT, 0xffe0a0, 420, 0.3);
+        this.groundRing(x, y, 30, 240, 0x80b0ff, 0.4);
+        this.scorch(x, y, 220);
+        this.shake = Math.max(this.shake, 10);
+        break;
+      case 'splitterBurst':
+        this.groundRing(x, y, 20, 170, 0x60a0ff, 0.45);
+        this.burst(x, y, PROJ_HEIGHT, 24, { speed: 320, color: 0xa0d0ff, endColor: 0x2050ff, size: 22, endSize: 4, life: 0.4, drag: 3 });
+        this.burst(x, y, 10, 10, { speed: 160, color: 0x8a7458, size: 30, endSize: 70, life: 0.8, drag: 3, alpha: 0.5 }, this.smoke);
+        break;
+      case 'freeze':
+        this.groundRing(x, y, 10, 90, 0xa0e0ff, 0.5);
+        this.burst(x, y, 40, 30, { speed: 160, color: 0xe0f8ff, endColor: 0x4090ff, size: 22, endSize: 6, life: 0.6, vy: 60 });
+        this.flash(x, y, 40, 0x80d0ff, 140, 0.3);
+        break;
+      case 'unfreeze':
+      case 'thrustEnd':
+        this.burst(x, y, 40, 14, { speed: 140, color: 0xd0f0ff, endColor: 0x4080ff, size: 16, endSize: 4, life: 0.4 });
+        this.burst(x, y, 30, 6, { speed: 60, color: 0xc8d8e8, size: 30, endSize: 60, life: 0.7, drag: 2, alpha: 0.35 }, this.smoke);
+        break;
+      case 'timeshiftDummy': {
+        // Marks the spot the caster will snap back to (3.6 s later).
+        const m = new THREE.Mesh(
+          new THREE.PlaneGeometry(WARLOCK_RADIUS * 3.4, WARLOCK_RADIUS * 3.4),
+          new THREE.MeshBasicMaterial({ map: this.tex.thickRing, color: 0x8090ff, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }),
+        );
+        m.rotation.x = -Math.PI / 2;
+        m.position.set(x, 2, -y);
+        m.renderOrder = 5;
+        this.addTransient(m, 3.6, (t) => {
+          (m.material as THREE.MeshBasicMaterial).opacity = (0.45 + 0.25 * Math.sin(t * 40)) * Math.min(1, (1 - t) * 10);
+          m.rotation.z = t * 6;
+        });
+        this.burst(x, y, 50, 16, { speed: 120, color: 0xc0c8ff, endColor: 0x4040c0, size: 20, endSize: 4, life: 0.5 });
+        break;
+      }
+      case 'timeshiftRestore':
+        this.flash(x, y, 50, 0x8090ff, 160, 0.35);
+        for (let i = 0; i < 16; i++)
+          this.fx.emit({ x: x + rand(-20, 20), y: rand(0, 20), z: -y + rand(-20, 20), vy: rand(250, 450), life: 0.6, size: 24, endSize: 6, color: 0xc0c8ff, endColor: 0x4040ff });
+        break;
+      case 'respawn':
+        this.groundRing(x, y, 10, 110, 0xffe080, 0.7, this.tex.ring);
+        for (let i = 0; i < 24; i++) {
+          const a = rand(0, Math.PI * 2);
+          this.fx.emit({ x: x + Math.cos(a) * 35, y: rand(0, 20), z: -y + Math.sin(a) * 35, vy: rand(120, 260), life: rand(0.6, 1), size: 18, endSize: 4, color: 0xfff0b0, endColor: 0xffa020 });
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
   private scorch(x: number, y: number, size: number) {
     if (!this.sim.isSafePoint(x, y)) return;
     const m = new THREE.Mesh(
@@ -809,6 +900,9 @@ export class GameRenderer {
         this.burst(e.x, e.y, 40, 26, { speed: 260, color: 0xffe0a0, endColor: 0xff6000, size: 20, endSize: 4, life: 0.4 });
         this.burst(e.x, e.y, 10, 12, { speed: 120, color: 0x8a7458, size: 30, endSize: 70, life: 0.9, drag: 3, alpha: 0.6 }, this.smoke);
         this.shake = Math.max(this.shake, 6);
+        break;
+      case 'effect':
+        this.effect(e.name, e.x, e.y);
         break;
       case 'linkHit': {
         const t = this.sim.players[e.target];
