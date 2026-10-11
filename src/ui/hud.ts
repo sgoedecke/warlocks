@@ -1,5 +1,5 @@
 import {
-  ICE_TILE, ITEMS, MAP_MAX, MAP_MIN, TILE_SIZE, PLAYER_COLORS, SPELLS, WARLOCK_CARD, WARLOCK_HP, productName, spellCooldown, spellPrice, type ItemId, type ProductId, type SpellId,
+  ALL_SPELLS, ICE_TILE, ITEMS, MAP_MAX, MAP_MIN, TILE_SIZE, PLAYER_COLORS, SPELLS, WARLOCK_CARD, WARLOCK_HP, productName, spellCooldown, spellPrice, type ItemId, type ProductId, type SpellId,
 } from '../config';
 import type { Sim } from '../sim/game';
 import type { GameEvent, Warlock } from '../sim/types';
@@ -96,7 +96,8 @@ export class Hud {
   private minimap: HTMLCanvasElement;
   private mg: CanvasRenderingContext2D;
   private els: Record<string, HTMLElement> = {};
-  private cmdButtons = new Map<SpellId, HTMLElement>();
+  /** One command-card slot per hotkey, showing whichever of its spells the player has learned. */
+  private cmdSlots: { el: HTMLElement; spells: SpellId[]; id: SpellId | null }[] = [];
   private shopItems = new Map<ProductId, HTMLElement>();
   private shopCells: { page: ShopPage; el: HTMLElement; toggle?: 'firespray' | 'splitter' }[] = [];
   private shopPage: ShopPage = 'merchant';
@@ -242,27 +243,27 @@ export class Hud {
   }
 
   private buildCommandCard(card: HTMLElement) {
-    const slots: (SpellId | null)[] = Array(12).fill(null);
-    WARLOCK_CARD.forEach((id, i) => (slots[i] = id));
-    for (const id of slots) {
+    for (let i = 0; i < 12; i++) {
       const b = document.createElement('div');
       b.className = 'cmd empty';
       card.appendChild(b);
-      if (!id) continue;
-      b.innerHTML = `<div class="cd" style="--p:1"></div><div class="cd-text"></div><div class="hk-badge">${SPELLS[id].hotkey}</div><div class="lvl"></div>`;
-      b.style.backgroundImage = `url(${spellIcon(id)})`;
+      const first = WARLOCK_CARD[i];
+      if (!first) continue;
+      const column = SPELLS[first].column;
+      const slot = { el: b, spells: column === 'core' ? [first] : ALL_SPELLS.filter((s) => SPELLS[s].column === column), id: null as SpellId | null };
+      b.innerHTML = `<div class="cd" style="--p:1"></div><div class="cd-text"></div><div class="hk-badge">${SPELLS[first].hotkey}</div><div class="lvl"></div>`;
       b.addEventListener('mousedown', (e) => {
         e.stopPropagation();
-        if (e.button === 0 && !b.classList.contains('empty')) this.cb.onSpell(id);
+        if (e.button === 0 && slot.id) this.cb.onSpell(slot.id);
       });
-      b.addEventListener('mouseenter', () => (this.hoverProduct = { id, shop: false }));
+      b.addEventListener('mouseenter', () => (this.hoverProduct = slot.id ? { id: slot.id, shop: false } : null));
       b.addEventListener('mouseleave', () => (this.hoverProduct = null));
-      this.cmdButtons.set(id, b);
+      this.cmdSlots.push(slot);
     }
   }
 
   pressButton(id: SpellId) {
-    const b = this.cmdButtons.get(id);
+    const b = this.cmdSlots.find((s) => s.id === id)?.el;
     if (!b) return;
     b.classList.add('pressed');
     setTimeout(() => b.classList.remove('pressed'), 110);
@@ -482,13 +483,16 @@ export class Hud {
     setHtml(this.els.buffs, bh);
 
     // Command card
-    for (const [id, b] of this.cmdButtons) {
-      const lvl = me.spells[id] ?? 0;
-      b.classList.toggle('empty', lvl === 0);
-      if (lvl === 0) {
-        setStyle(b, 'background-image', '');
-        continue;
+    for (const slot of this.cmdSlots) {
+      const b = slot.el;
+      const id = slot.spells.find((s) => (me.spells[s] ?? 0) > 0) ?? null;
+      if (id !== slot.id) {
+        slot.id = id;
+        if (this.hoverProduct && !this.hoverProduct.shop && b.matches(':hover')) this.hoverProduct = id ? { id, shop: false } : null;
       }
+      b.classList.toggle('empty', !id);
+      if (!id) continue;
+      const lvl = me.spells[id]!;
       setStyle(b, 'background-image', `url(${spellIcon(id)})`);
       const cd = me.cooldowns[id] ?? 0;
       const total = spellCooldown(id, lvl);

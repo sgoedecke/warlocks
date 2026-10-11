@@ -470,8 +470,7 @@ body {
 }
 
 .cmd.empty {
-  background: radial-gradient(#0f0d0a, #050403);
-  box-shadow: inset 0 0 0 1px #1a150d;
+  visibility: hidden;
 }
 
 .cmd:not(.empty):hover {
