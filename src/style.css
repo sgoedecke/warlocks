@@ -11,6 +11,7 @@
   --panel: #0d0b08;
   --font: 'WC3', 'Friz Quadrata TT', 'Trajan Pro', 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
   --console-h: 196px;
+  --topbar-h: 34px;
 }
 
 * {
@@ -119,7 +120,7 @@ body {
   top: 0;
   left: 0;
   right: 0;
-  height: 34px;
+  height: var(--topbar-h);
   display: flex;
   justify-content: space-between;
   align-items: flex-start;

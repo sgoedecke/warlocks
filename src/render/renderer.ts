@@ -227,6 +227,10 @@ export class GameRenderer {
     const r = this.renderer.domElement.getBoundingClientRect();
     this.viewRect = { left: r.left, top: r.top, width: r.width || 1, height: r.height || 1 };
     this.camera.aspect = w / h;
+    // Centre the view on the strip between the top bar and the bottom console, not the whole window.
+    const css = getComputedStyle(document.documentElement);
+    const shift = Math.round(((parseFloat(css.getPropertyValue('--console-h')) || 0) - (parseFloat(css.getPropertyValue('--topbar-h')) || 0)) / 2);
+    this.camera.setViewOffset(w, h, 0, shift, w, h);
     this.camera.updateProjectionMatrix();
     const ph = h * this.renderer.getPixelRatio();
     this.fx.setScale(ph, CAM_FOV);
