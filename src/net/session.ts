@@ -1,5 +1,5 @@
 import { joinRoom, selfId, type JsonValue, type Room } from 'trystero/nostr';
-import { BOT_NAMES, PLAYER_COLORS } from '../config';
+import { PLAYER_COLORS, shuffledBotNames } from '../config';
 import type { Difficulty } from '../ai/bot';
 import type { Command, PlayerSetup, SimRules } from '../sim/types';
 import { Lockstep, sanitizeCommand } from './lockstep';
@@ -11,7 +11,9 @@ export const PROTOCOL_VERSION = 2;
 export const MAX_PLAYERS = 10;
 const CONNECT_TIMEOUT_MS = 20000;
 /** Public rooms: how long to look for a host before hosting, and how many busy rooms to skip past. */
-const PUBLIC_HOST_WAIT_MS = 6000;
+const PUBLIC_HOST_WAIT_MS = 3000;
+/** Bots a Quick Play host's lobby starts with. */
+const PUBLIC_BOTS = 3;
 const PUBLIC_REJECTED_WAIT_MS = 1500;
 export const PUBLIC_ROOMS = 20;
 /** WebRTC can take half a minute to notice a vanished peer, so peers ping and drop silent ones sooner. */
@@ -123,9 +125,9 @@ export class NetSession {
     return new NetSession(normalizeCode(code), false, me, 0, { rules: {} as NetRules, difficulty: 'normal', bots: 0 });
   }
 
-  /** Public room `n` (1-based). If nobody is hosting there, this peer hosts with these settings and no bots. */
+  /** Public room `n` (1-based). If nobody is hosting there, this peer hosts with these settings and a few bots. */
   static public(n: number, me: { name: string; color: number }, rules: NetRules, difficulty: Difficulty) {
-    return new NetSession(`PUBLIC${n}`, false, me, n, { rules, difficulty, bots: 0 });
+    return new NetSession(`PUBLIC${n}`, false, me, n, { rules, difficulty, bots: PUBLIC_BOTS });
   }
 
   get isPublic() {
@@ -162,7 +164,7 @@ export class NetSession {
   /** Host: start the game for everyone in the lobby. */
   startGame() {
     if (!this.isHost || !this.lobby || this.inGame) return;
-    const names = [...BOT_NAMES].sort(() => Math.random() - 0.5);
+    const names = shuffledBotNames();
     let bot = 0;
     const players: PlayerSetup[] = this.lobby.slots.map((s) => ({ name: s.peer ? s.name : names[bot++ % names.length], color: s.color, isBot: !s.peer }));
     const info: StartInfo = {

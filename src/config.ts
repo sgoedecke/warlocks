@@ -61,6 +61,11 @@ export const BOT_NAMES = [
   'Dentarg', 'Rend', 'Maim', 'Mannoroth', 'Kil\'jaeden', 'Archimonde', 'Tichondrius', 'Mal\'Ganis',
 ];
 
+/** Bot names in random order, marked so they can't be mistaken for people. */
+export function shuffledBotNames(): string[] {
+  return [...BOT_NAMES].sort(() => Math.random() - 0.5).map((n) => `${n} (Bot)`);
+}
+
 export type SpellId =
   | 'fireball' | 'scourge'
   | 'lightning' | 'homing' | 'boomerang'

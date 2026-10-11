@@ -1,6 +1,6 @@
 import './style.css';
 import {
-  ALL_SPELLS, BOT_NAMES, DT, PLAYER_COLORS, SPELLS, WARLOCK_CARD, WARLOCK_RADIUS, type SpellId,
+  ALL_SPELLS, DT, PLAYER_COLORS, shuffledBotNames, SPELLS, WARLOCK_CARD, WARLOCK_RADIUS, type SpellId,
 } from './config';
 import { Bot, type Difficulty } from './ai/bot';
 import { Sim } from './sim/game';
@@ -71,7 +71,7 @@ interface GameSetup {
 
 function localSetup(name: string, bots: number, rules: Partial<SimRules> = RULES): GameSetup {
   const players: PlayerSetup[] = [{ name, color: 0, isBot: false }];
-  const names = [...BOT_NAMES].sort(() => Math.random() - 0.5);
+  const names = shuffledBotNames();
   for (let i = 0; i < bots; i++) players.push({ name: names[i], color: i + 1, isBot: true });
   return { players, seed: (Math.random() * 2 ** 31) | 0, rules, difficulty: DIFFICULTY, localId: 0 };
 }
@@ -710,6 +710,7 @@ function showLobby(session: NetSession) {
   };
   const close = () => el.remove();
   const remember = () => {
+    if (session.isPublic) return;
     const s = loadSettings();
     s.bots = session.botCount;
     saveSettings(s);
