@@ -40,10 +40,11 @@ Everything is drawn in code or comes from openly licensed models; the repository
 
 | Input | Action |
 | --- | --- |
+| `W A S D` | Move |
 | Right-click | Move / cancel targeting |
 | Hotkey, then left-click | Cast targeted spell |
-| `D E R T Y F G C` | WC3 command-card spell hotkeys for the currently learned spell in each slot |
-| `S` | Stop |
+| `Q E R T Y F G C` | Command-card spell hotkeys (the original's `D` slot is on `Q`, leaving WASD free) for the currently learned spell in each slot |
+| `X` | Stop |
 | Arrow keys / screen edge | Pan camera |
 | Mouse wheel | Zoom |
 | `Space` / `F1` | Centre camera on hero |

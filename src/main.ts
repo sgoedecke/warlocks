@@ -91,6 +91,10 @@ class Game {
   private pending: Command[] = [];
   private mouse = { x: 0, y: 0, inside: false };
   private keys = new Set<string>();
+  /** WASD walking: the last order we sent was a WASD move toward `walkTarget`. */
+  private walking = false;
+  private walkTarget = { x: 0, y: 0 };
+  private walkSentAt = 0;
   private acc = 0;
   private last = performance.now();
   private raf = 0;
@@ -229,6 +233,8 @@ class Game {
 
   /** A local order: straight into the next tick offline, or to the host online. */
   private queue(cmd: Command) {
+    // Any other order replaces the walk; an instant spell doesn't touch the current order.
+    if (cmd.type === 'move' || cmd.type === 'stop' || (cmd.type === 'cast' && SPELLS[cmd.spell].targeting !== 'none')) this.walking = false;
     if (this.net) this.net.lockstep.submit(cmd);
     else this.pending.push(cmd);
   }
@@ -314,12 +320,12 @@ class Game {
     this.listen(canvas, 'wheel', (e) => {
       this.renderer.camDist = Math.max(1000, Math.min(2600, this.renderer.camDist + e.deltaY * 0.8));
     }, { passive: true });
-    this.listen(window, 'keyup', (e) => this.keys.delete(e.key));
+    this.listen(window, 'keyup', (e) => this.keys.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key));
     this.listen(window, 'keydown', (e) => {
       if ((e.target as HTMLElement).tagName === 'INPUT') return;
       sound.ensure();
-      this.keys.add(e.key);
       const k = e.key.toUpperCase();
+      this.keys.add(e.key.length === 1 ? e.key.toLowerCase() : e.key);
       if (e.key === 'F10' || (e.key === 'Escape' && !this.targeting)) {
         e.preventDefault();
         this.setPaused(!this.paused);
@@ -350,7 +356,7 @@ class Game {
         this.hud.message(`Camera lock ${this.lockCamera ? 'enabled' : 'disabled'}.`, 3);
         return;
       }
-      if (k === 'S') {
+      if (k === 'X') {
         this.targeting = null;
         if (this.canAct()) this.queue({ pid: this.localId, type: 'stop' });
         return;
@@ -385,6 +391,43 @@ class Game {
       r.camX += (this.me.x - r.camX) * k;
       r.camY += (this.me.y - r.camY) * k;
     }
+  }
+
+  /** WASD sends ordinary move orders toward a point ahead, re-sent only when they stop matching the keys. */
+  private updateWalk(now: number) {
+    const k = this.keys;
+    let dx = (k.has('d') ? 1 : 0) - (k.has('a') ? 1 : 0);
+    let dy = (k.has('w') ? 1 : 0) - (k.has('s') ? 1 : 0);
+    if (!dx && !dy) {
+      if (this.walking && this.canAct()) this.queue({ pid: this.localId, type: 'stop' });
+      this.walking = false;
+      return;
+    }
+    if (!this.canAct()) return;
+    const len = Math.hypot(dx, dy);
+    dx /= len;
+    dy /= len;
+    const me = this.me;
+    const idle = me.order.type === 'idle';
+    let send = false;
+    if (!this.walking) {
+      // Holding a direction resumes walking once a cast or right-click order has finished.
+      send = idle;
+    } else {
+      const tx = this.walkTarget.x - me.x;
+      const ty = this.walkTarget.y - me.y;
+      const dist = Math.hypot(tx, ty);
+      const turned = dist < 400 || (tx * dx + ty * dy) / dist < 0.995;
+      // Orders arrive a few ticks late online, so a still-idle warlock is only re-ordered after a pause.
+      send = turned || (idle && now - this.walkSentAt > 250);
+    }
+    if (!send) return;
+    const x = me.x + dx * 1000;
+    const y = me.y + dy * 1000;
+    this.queue({ pid: this.localId, type: 'move', x, y });
+    this.walking = true;
+    this.walkTarget = { x, y };
+    this.walkSentAt = now;
   }
 
   private updateCursorAndAoe() {
@@ -517,6 +560,7 @@ class Game {
     if (!this.simPaused) this.simulate(dt);
     if (this.targeting && !this.canAct()) this.targeting = null;
     this.updateCamera(dt);
+    this.updateWalk(now);
     this.updateCursorAndAoe();
     sound.setListener(this.renderer.camX, this.renderer.camY);
     this.renderer.render(this.simPaused ? 1 : Math.min(1, this.acc / DT), this.simPaused ? 0 : dt);
@@ -582,9 +626,9 @@ function escapeHtml(t: string) {
 }
 
 const CONTROLS: [string, string][] = [
-  ['Right-click', 'Move'],
+  ['WASD / right-click', 'Move'],
   ['Hotkey, then left-click', 'Cast'],
-  ['S', 'Stop'],
+  ['X', 'Stop'],
   ['Esc', 'Cancel'],
   ['Arrows / screen edge', 'Scroll'],
   ['Wheel', 'Zoom'],
