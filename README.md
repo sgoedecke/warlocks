@@ -45,10 +45,8 @@ Everything is drawn in code or comes from openly licensed models; the repository
 | Hotkey, then left-click | Cast targeted spell |
 | `Q E R T Y F G C` | Command-card spell hotkeys (the original's `D` slot is on `Q`, leaving WASD free) for the currently learned spell in each slot |
 | `X` | Stop |
-| Arrow keys / screen edge | Pan camera |
+| Arrow keys / screen edge | Pan camera while dead (otherwise it stays on your warlock) |
 | Mouse wheel | Zoom |
-| `Space` / `F1` | Centre camera on hero |
-| `L` | Lock camera to hero |
 | `Tab` | Multiboard |
 | `F10` / `Esc` | Menu |
 | `Enter` | Chat (online games) |

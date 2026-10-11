@@ -26,7 +26,6 @@ interface DevOptions {
   frameCap?: number;
   pixelRatio?: number;
   antialias?: boolean;
-  lockCamera?: boolean;
 }
 
 /** 60 fps at up to 1.5× device pixels: GPU cost scales with pixels drawn, so these set most of the power draw. */
@@ -99,7 +98,6 @@ class Game {
   private last = performance.now();
   private raf = 0;
   private paused = false;
-  private lockCamera: boolean;
   private disposers: (() => void)[] = [];
   private frameCap: number;
 
@@ -110,7 +108,6 @@ class Game {
     this.sim = new Sim({ players, seed, rules: setup.rules });
     // Bots are deterministic, so in multiplayer every peer runs all of them rather than sending their orders.
     this.bots = this.sim.players.filter((p) => p.isBot).map((p) => new Bot(p.id, seed ^ (p.id * 7919), setup.difficulty));
-    this.lockCamera = dev.lockCamera ?? false;
 
     this.root = document.createElement('div');
     this.root.id = 'game';
@@ -345,17 +342,7 @@ class Game {
         this.hud.toggleScores();
         return;
       }
-      if (e.key === ' ' || e.key === 'F1') {
-        e.preventDefault();
-        this.renderer.centerOn(this.me.x, this.me.y);
-        return;
-      }
       if (this.paused || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
-      if (k === 'L') {
-        this.lockCamera = !this.lockCamera;
-        this.hud.message(`Camera lock ${this.lockCamera ? 'enabled' : 'disabled'}.`, 3);
-        return;
-      }
       if (k === 'X') {
         this.targeting = null;
         if (this.canAct()) this.queue({ pid: this.localId, type: 'stop' });
@@ -367,8 +354,16 @@ class Game {
     });
   }
 
+  /** The camera stays on the warlock, where the renderer draws it; it only pans while you're dead. */
   private updateCamera(dt: number) {
     const r = this.renderer;
+    const me = this.me;
+    if (me.alive) {
+      const a = this.simPaused ? 1 : Math.min(1, this.acc / DT);
+      r.camX = me.px + (me.x - me.px) * a;
+      r.camY = me.py + (me.y - me.py) * a;
+      return;
+    }
     const speed = 1500 * (r.camDist / 1650) * dt;
     let dx = 0;
     let dy = 0;
@@ -386,10 +381,6 @@ class Game {
     if (dx || dy) {
       r.camX = Math.max(-1200, Math.min(1200, r.camX + dx * speed));
       r.camY = Math.max(-1200, Math.min(1200, r.camY + dy * speed));
-    } else if (this.lockCamera && this.me.alive) {
-      const k = 1 - Math.exp(-dt * 6);
-      r.camX += (this.me.x - r.camX) * k;
-      r.camY += (this.me.y - r.camY) * k;
     }
   }
 
@@ -630,10 +621,8 @@ const CONTROLS: [string, string][] = [
   ['Hotkey, then left-click', 'Cast'],
   ['X', 'Stop'],
   ['Esc', 'Cancel'],
-  ['Arrows / screen edge', 'Scroll'],
+  ['Arrows / screen edge', 'Scroll (while dead)'],
   ['Wheel', 'Zoom'],
-  ['Space', 'Centre on hero'],
-  ['L', 'Camera lock'],
   ['Tab', 'Scores'],
   ['Enter', 'Chat'],
   ['F10', 'Menu'],
@@ -856,7 +845,7 @@ async function boot() {
     showLobby(NetSession.host({ name: p.get('name') ?? loadSettings().name, color: 0 }, RULES, DIFFICULTY, Number(p.get('bots') ?? 0)));
   } else if (import.meta.env.DEV && new URLSearchParams(location.search).has('autostart')) {
     const p = new URLSearchParams(location.search);
-    const dev: DevOptions = { lockCamera: true };
+    const dev: DevOptions = {};
     if (p.has('fps')) dev.frameCap = Number(p.get('fps'));
     if (p.has('res')) dev.pixelRatio = Number(p.get('res'));
     if (p.has('aa')) dev.antialias = p.get('aa') === '1';
