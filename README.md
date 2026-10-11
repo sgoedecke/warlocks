@@ -60,6 +60,26 @@ The map's models borrow all of their textures from the base game. `src/render/op
 | `Tab` | Multiboard |
 | `F10` / `Esc` | Menu |
 
+## Graphics and power use
+
+The menu's **Graphics** setting picks a frame cap and the maximum render resolution (device pixel ratio):
+
+| Preset | Frame cap | Resolution |
+| --- | --- | --- |
+| Battery saver | 30 fps | 1× (soft on Retina) |
+| Balanced (default) | 60 fps | 1.5× |
+| High | display refresh rate | 2× (native Retina) |
+
+**Anti-aliasing** (MSAA) is a separate toggle. Turning it off saves about a quarter of the GPU time but leaves jagged model edges; classic WC3 had none either. Other battery-related behaviour:
+
+- The game drops to 20 fps when the window is unfocused and to 10 fps while paused.
+- Between capped frames it sleeps on a timer, so Chrome stops waking on every vsync.
+- The unit portrait and minimap redraw at 30 fps.
+- The audio graph suspends when the volume is 0 or the tab is hidden.
+- WebGL is created with `powerPreference: 'low-power'`.
+
+MDX models are skinned on the GPU. Each instance uploads one palette of averaged matrix-group matrices, deduplicated across geosets, as vertex uniforms. Geometry is shared by all instances of a model, and particle and ribbon buffers are persistent. Dev autostart accepts `fps=`, `res=` and `aa=0|1` overrides for benchmarking.
+
 ## Architecture
 
 ```

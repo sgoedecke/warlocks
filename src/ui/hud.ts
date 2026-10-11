@@ -63,6 +63,28 @@ export const SHOP_ICON_PATHS = [
   `${BTN}BTNHumanCaptureFlag.blp`, `${BTN}BTNHire.blp`,
 ];
 
+// Per-frame HUD writes go through these so unchanged values don't invalidate style and layout.
+const lastText = new WeakMap<Element, string>();
+const lastHtml = new WeakMap<Element, string>();
+const lastStyle = new WeakMap<HTMLElement, Record<string, string>>();
+function setText(el: Element, s: string) {
+  if (lastText.get(el) === s) return;
+  lastText.set(el, s);
+  el.textContent = s;
+}
+function setHtml(el: Element, s: string) {
+  if (lastHtml.get(el) === s) return;
+  lastHtml.set(el, s);
+  el.innerHTML = s;
+}
+function setStyle(el: HTMLElement, prop: string, value: string) {
+  let m = lastStyle.get(el);
+  if (!m) lastStyle.set(el, (m = {}));
+  if (m[prop] === value) return;
+  m[prop] = value;
+  el.style.setProperty(prop, value);
+}
+
 function esc(s: string) {
   return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 }
@@ -210,11 +232,18 @@ export class Hud {
 
   private onResize = () => this.resize();
 
+  private overlayW = 0;
+  private overlayH = 0;
+  private overlayFont = '';
+
   private resize() {
     const dpr = Math.min(window.devicePixelRatio, 2);
-    this.overlay.width = this.overlay.clientWidth * dpr;
-    this.overlay.height = this.overlay.clientHeight * dpr;
+    this.overlayW = this.overlay.clientWidth;
+    this.overlayH = this.overlay.clientHeight;
+    this.overlay.width = this.overlayW * dpr;
+    this.overlay.height = this.overlayH * dpr;
     this.og.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.overlayFont = `bold 16px ${getComputedStyle(document.body).fontFamily}`;
   }
 
   isOverUi(target: EventTarget | null): boolean {
@@ -421,14 +450,14 @@ export class Hud {
   update(dt: number, targeting: SpellId | null, countdownTick: (n: number) => void) {
     const sim = this.sim;
     const me = sim.players[this.localId];
-    this.els.gold.textContent = String(me.gold);
+    setText(this.els.gold, String(me.gold));
     const alive = sim.players.filter((p) => p.alive).length;
-    this.els.alive.textContent = `Alive ${alive}/${sim.players.length}`;
+    setText(this.els.alive, `Alive ${alive}/${sim.players.length}`);
 
     const t = Math.floor(sim.roundTime);
-    if (sim.phase === 'shop') this.els.clock.textContent = `Shop ${Math.ceil(Math.max(0, sim.phaseTimer))}`;
-    else this.els.clock.textContent = `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
-    this.els.round.textContent = `Round ${sim.round} / ${sim.totalRounds}`;
+    if (sim.phase === 'shop') setText(this.els.clock, `Shop ${Math.ceil(Math.max(0, sim.phaseTimer))}`);
+    else setText(this.els.clock, `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`);
+    setText(this.els.round, `Round ${sim.round} / ${sim.totalRounds}`);
 
     if (sim.phase === 'countdown') {
       const n = Math.ceil(sim.phaseTimer);
@@ -440,17 +469,17 @@ export class Hud {
     } else this.lastCountdown = -1;
 
     this.centerTimer -= dt;
-    if (this.centerTimer <= 0) this.els.center.style.opacity = '0';
+    if (this.centerTimer <= 0 && this.els.center.style.opacity !== '0') this.els.center.style.opacity = '0';
     this.errorTimer -= dt;
-    if (this.errorTimer <= 0) this.els.error.style.opacity = '0';
+    if (this.errorTimer <= 0 && this.els.error.style.opacity !== '0') this.els.error.style.opacity = '0';
 
     // Portrait & unit info
-    this.els.portraitHp.textContent = `${Math.ceil(Math.max(0, me.hp))} / ${WARLOCK_HP}`;
-    this.els.portraitHp.style.color = me.hp / WARLOCK_HP > 0.5 ? '#2ad52a' : me.hp / WARLOCK_HP > 0.25 ? '#e0d020' : '#e02020';
-    this.els.name.innerHTML = playerName(me);
+    setText(this.els.portraitHp, `${Math.ceil(Math.max(0, me.hp))} / ${WARLOCK_HP}`);
+    setStyle(this.els.portraitHp, 'color', me.hp / WARLOCK_HP > 0.5 ? '#2ad52a' : me.hp / WARLOCK_HP > 0.25 ? '#e0d020' : '#e02020');
+    setHtml(this.els.name, playerName(me));
     const statsHtml = `<div>Kills: <span>${me.stats.kills}</span></div><div>Wins: <span>${me.stats.wins}</span></div>` +
       `<div>Deaths: <span>${me.stats.deaths}</span></div><div>Damage: <span>${Math.round(me.stats.damage)}</span></div>`;
-    if (this.els.stats.innerHTML !== statsHtml) this.els.stats.innerHTML = statsHtml;
+    setHtml(this.els.stats, statsHtml);
     const buffs: string[] = [];
     if (me.shield > 0) buffs.push(`<img title="Shield" src="${spellIcon('shield', 32)}">`);
     if (me.windwalk > 0) buffs.push(`<img title="Windwalk" src="${spellIcon('windwalk', 32)}">`);
@@ -458,25 +487,24 @@ export class Hud {
     if (me.inLava && me.alive) buffs.push(`<span style="color:#ff6020">Burning!</span>`);
     if (!me.alive) buffs.push(`<span style="color:#aaa">Dead - waiting for next round</span>`);
     const bh = buffs.join('');
-    if (this.els.buffs.innerHTML !== bh) this.els.buffs.innerHTML = bh;
+    setHtml(this.els.buffs, bh);
 
     // Command card
     for (const [id, b] of this.cmdButtons) {
       const lvl = me.spells[id] ?? 0;
       b.classList.toggle('empty', lvl === 0);
       if (lvl === 0) {
-        b.style.backgroundImage = '';
+        setStyle(b, 'background-image', '');
         continue;
       }
-      b.style.backgroundImage = `url(${spellIcon(id)})`;
+      setStyle(b, 'background-image', `url(${spellIcon(id)})`);
       const cd = me.cooldowns[id] ?? 0;
       const total = spellCooldown(id, lvl);
-      (b.querySelector('.cd') as HTMLElement).style.setProperty('--p', cd > 0 ? String(1 - cd / total) : '1');
+      // The cooldown sweep is drawn in CSS; ~100 steps is visually continuous and avoids a restyle every frame.
+      setStyle(b.querySelector('.cd') as HTMLElement, '--p', cd > 0 ? (1 - cd / total).toFixed(2) : '1');
       const txt = cd > 0 ? (cd < 1 ? cd.toFixed(1) : String(Math.ceil(cd))) : '';
-      const ct = b.querySelector('.cd-text') as HTMLElement;
-      if (ct.textContent !== txt) ct.textContent = txt;
-      const lt = b.querySelector('.lvl') as HTMLElement;
-      if (lt.textContent !== String(lvl)) lt.textContent = String(lvl);
+      setText(b.querySelector('.cd-text') as HTMLElement, txt);
+      setText(b.querySelector('.lvl') as HTMLElement, String(lvl));
       b.classList.toggle('active', targeting === id);
       b.classList.toggle('disabled', !me.alive);
     }
@@ -485,11 +513,11 @@ export class Hud {
     const shopOpen = sim.phase === 'shop';
     this.els.shop.classList.toggle('hidden', !shopOpen);
     if (shopOpen) {
-      this.els.shopGold.textContent = String(me.gold);
+      setText(this.els.shopGold, String(me.gold));
       const waiting = sim.players.filter((p) => !p.ready).length;
-      this.els.shopTimer.textContent = me.ready
+      setText(this.els.shopTimer, me.ready
         ? `Waiting for ${waiting} player${waiting === 1 ? '' : 's'}… ${Math.ceil(sim.phaseTimer)}`
-        : `Round ${sim.round} starts in ${Math.ceil(Math.max(0, sim.phaseTimer))}`;
+        : `Round ${sim.round} starts in ${Math.ceil(Math.max(0, sim.phaseTimer))}`);
       (this.root.querySelector('[data-act="ready"]') as HTMLButtonElement).disabled = me.ready;
       for (const [id, it] of this.shopItems) {
         const isSpell = id in SPELLS;
@@ -501,11 +529,9 @@ export class Hud {
         const locked = column !== 'core' && !!me.chosen[column] && me.chosen[column] !== id;
         const price = isSpell ? spellPrice(id as SpellId, lvl) : id in ITEMS ? (ITEMS[id as keyof typeof ITEMS].costs[lvl] ?? 999) : id === 'inventory' ? 3 : 8 + 2 * lvl;
         const pips = Array.from({ length: Math.min(maxLevel, 12) }, (_, i) => `<i class="${i < lvl ? 'on' : ''}"></i>`).join('');
-        const pe = it.querySelector('.pips') as HTMLElement;
-        if (pe.innerHTML !== pips) pe.innerHTML = pips;
+        setHtml(it.querySelector('.pips') as HTMLElement, pips);
         const pr = it.querySelector('.price') as HTMLElement;
-        const ptxt = locked ? 'Unavailable' : max ? 'Max level' : `${lvl ? 'Upgrade' : 'Learn'}: ${price}`;
-        if (pr.textContent !== ptxt) pr.textContent = ptxt;
+        setText(pr, locked ? 'Unavailable' : max ? 'Max level' : `${lvl ? 'Upgrade' : 'Learn'}: ${price}`);
         pr.classList.toggle('max', max && !locked);
         it.classList.toggle('locked', locked);
         it.classList.toggle('unaffordable', !max && !locked && price > me.gold);
@@ -515,8 +541,7 @@ export class Hud {
         const learned = (me.spells[c.toggle] ?? 0) > 0;
         c.el.classList.toggle('hidden', !learned);
         const mode = c.toggle === 'firespray' ? (me.fireSprayFan ? 'Fan' : 'Stream') : (me.splitterContinuous ? 'Continuous' : 'Normal');
-        const pr = c.el.querySelector('.price') as HTMLElement;
-        if (pr.textContent !== mode) pr.textContent = mode;
+        setText(c.el.querySelector('.price') as HTMLElement, mode);
       }
     } else if (this.shopPage !== 'merchant') {
       this.setShopPage('merchant');
@@ -531,8 +556,14 @@ export class Hud {
     }
 
     this.drawOverlay(dt);
-    this.drawMinimap();
+    this.minimapDt += dt;
+    if (this.minimapDt >= 1 / 30 - 0.002 || dt === 0) {
+      this.minimapDt = 0;
+      this.drawMinimap();
+    }
   }
+
+  private minimapDt = 1;
 
   private updateTooltip(me: Warlock) {
     const tt = this.els.tooltip;
@@ -546,7 +577,7 @@ export class Hud {
       const html = id.startsWith('nav:')
         ? `<div class="tt-title">${this.shopPage === 'merchant' ? SHOP_LAYOUT[target].title : 'Back to Merchant'}</div>`
         : `<div class="tt-title">Toggle ${id === 'toggle:firespray' ? 'Fire Spray' : 'Splitter'} mode</div><div>${id === 'toggle:firespray' ? 'Switches between a stream and a fan of fireballs.' : 'Switches between the normal and the continuous splitter.'}</div>`;
-      if (tt.innerHTML !== html) tt.innerHTML = html;
+      setHtml(tt, html);
       tt.classList.remove('hidden');
       this.placeTooltip(shop);
       return;
@@ -554,7 +585,7 @@ export class Hud {
     if (!(id in SPELLS)) {
       const item = id in ITEMS ? ITEMS[id as keyof typeof ITEMS] : null;
       const html = `<div class="tt-title">${productName(id as ProductId)}</div><div>${item?.tooltip ?? 'Permanent upgrade from the Merchant.'}</div>`;
-      if (tt.innerHTML !== html) tt.innerHTML = html;
+      setHtml(tt, html);
       tt.classList.remove('hidden');
       this.placeTooltip(shop);
       return;
@@ -570,7 +601,7 @@ export class Hud {
         : `<div class="tt-cost"><img src="${this.gold}">${spellPrice(spellId, lvl)}</div>`;
     }
     const html = `<div class="tt-title">${shop ? (lvl ? 'Upgrade ' : 'Learn ') : ''}${def.name} (<span class="hk">${def.hotkey}</span>) - [Level ${showLvl}]</div>${cost}<div>${def.tooltip}</div><div class="tt-cd">Cooldown: ${spellCooldown(spellId, showLvl).toFixed(1)} seconds</div>`;
-    if (tt.innerHTML !== html) tt.innerHTML = html;
+    setHtml(tt, html);
     tt.classList.remove('hidden');
     this.placeTooltip(shop);
   }
@@ -599,15 +630,13 @@ export class Hud {
       return `<tr class="${cls}"><td>${playerName(p)}${p.id === this.localId ? ' *' : ''}</td><td>${p.stats.wins}</td><td>${p.stats.kills}</td><td>${p.stats.deaths}</td></tr>`;
     });
     const html = `<tr><th>Player</th><th>W</th><th>K</th><th>D</th></tr>${rows.join('')}`;
-    if (this.els.mbTable.innerHTML !== html) this.els.mbTable.innerHTML = html;
-    (this.els.mb.querySelector('.mb-title') as HTMLElement).textContent = `Warlocks — Round ${this.sim.round}/${this.sim.totalRounds}`;
+    setHtml(this.els.mbTable, html);
+    setText(this.els.mb.querySelector('.mb-title') as HTMLElement, `Warlocks — Round ${this.sim.round}/${this.sim.totalRounds}`);
   }
 
   private drawOverlay(dt: number) {
     const g = this.og;
-    const w = this.overlay.clientWidth;
-    const h = this.overlay.clientHeight;
-    g.clearRect(0, 0, w, h);
+    g.clearRect(0, 0, this.overlayW, this.overlayH);
     // WC3 style health bars: fixed pixel size, colour shifts green -> yellow -> red.
     for (const p of this.sim.players) {
       if (!p.alive || (p.windwalk > 0 && p.id !== this.localId)) continue;
@@ -630,7 +659,7 @@ export class Hud {
       g.fillRect(x, y, Math.round(bw * f), 2);
     }
     // Floating bounty text
-    g.font = `bold 16px ${getComputedStyle(document.body).fontFamily}`;
+    g.font = this.overlayFont;
     g.textAlign = 'center';
     for (const f of this.floats) {
       f.t += dt;

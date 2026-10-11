@@ -39,11 +39,17 @@ const modelCache = new Map<string, Promise<MdxModel | null>>();
 const convertMatrix = new THREE.Matrix4().set(1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1);
 const convertMatrixInv = convertMatrix.clone().invert();
 const tempV = new THREE.Vector3();
-const tempV2 = new THREE.Vector3();
 const tempQ = new THREE.Quaternion();
 const tempS = new THREE.Vector3();
 const tempM = new THREE.Matrix4();
 const tempM2 = new THREE.Matrix4();
+const tempT = new THREE.Vector3();
+const tempSc = new THREE.Vector3();
+const tempR = new THREE.Quaternion();
+const tempColor = new THREE.Color();
+const tempEuler = new THREE.Euler();
+const identity = new THREE.Matrix4();
+const setupCamera = new THREE.PerspectiveCamera();
 const defaultTeam = new THREE.Color(0xc03030);
 
 interface TextureSlot {
@@ -64,9 +70,12 @@ interface GeosetPrepared {
   normals: Float32Array;
   uvs: Float32Array;
   indices: Uint16Array;
-  groupOffsets: Uint32Array;
+  /** Per vertex: index into the model's deduplicated matrix groups. */
+  vertexGroups: Float32Array;
   layers: LayerSlot[];
   geosetAnimation: GeosetAnimLike | null;
+  /** Bind-pose geometry shared by every instance of the model; skinned in the vertex shader. */
+  geometry?: THREE.BufferGeometry;
 }
 
 interface NodeInfo {
@@ -85,13 +94,23 @@ interface NodeState extends NodeInfo {
 
 interface MeshSlot {
   geoset: GeosetPrepared;
-  geometry: THREE.BufferGeometry;
   mesh: THREE.Mesh;
-  positionAttr: THREE.BufferAttribute;
-  normalAttr: THREE.BufferAttribute;
   material: THREE.MeshBasicMaterial;
   layer: LayerSlot;
   mapWasCloned: boolean;
+}
+
+/** Per instance: the matrix-group palette every geoset's vertex shader skins with. */
+interface SkinPalette {
+  /** Per matrix group: the top three rows of the average of its bones' world matrices. */
+  data: Float32Array;
+  /** Only for models with more groups than fit in vertex uniforms. */
+  texture: THREE.DataTexture | null;
+}
+
+interface SkinSlot {
+  geoset: GeosetPrepared;
+  layers: MeshSlot[];
 }
 
 interface Particle2 {
@@ -115,57 +134,81 @@ interface RibbonPoint {
   slot: number;
 }
 
-function modelToThree(v: THREE.Vector3): THREE.Vector3 {
-  return v.set(v.x, v.z, -v.y);
-}
-
-function directionToThree(v: THREE.Vector3): THREE.Vector3 {
-  return v.set(v.x, v.z, -v.y);
-}
-
 function trackMap(object: AnimatedLike): Map<string, AnimationTrack> {
   const keyed = object as AnimatedLike & { __mdxTrackMap?: Map<string, AnimationTrack> };
   if (!keyed.__mdxTrackMap) keyed.__mdxTrackMap = new Map(object.animations.map((a) => [a.name, a]));
   return keyed.__mdxTrackMap;
 }
 
-function scalarDefault(name: string, fallback: number): Float32Array {
-  if (name === 'KMTA' || name === 'KGAO' || name === 'KP2V' || name === 'KRVS') return new Float32Array([1]);
-  return new Float32Array([fallback]);
+const scratch = [new Float32Array(0), new Float32Array(1), new Float32Array(2), new Float32Array(3), new Float32Array(4)];
+const qa = new THREE.Quaternion();
+const qb = new THREE.Quaternion();
+type RangeCache = Map<number, number>;
+
+/** Index range [lo, hi] of keys inside [start, end]; frames are sorted, so binary search and cache per sequence. */
+function keyRange(track: AnimationTrack & { __ranges?: RangeCache }, start: number, end: number): number {
+  const cache = (track.__ranges ??= new Map());
+  const id = start * 1048576 + end;
+  let r = cache.get(id);
+  if (r === undefined) {
+    const f = track.frames;
+    let lo = 0;
+    while (lo < f.length && f[lo] < start) lo++;
+    let hi = lo - 1;
+    while (hi + 1 < f.length && f[hi + 1] <= end) hi++;
+    r = lo * 65536 + (hi - lo + 1);
+    cache.set(id, r);
+  }
+  return r;
 }
 
-function sampleTrack(instance: MdxInstance, object: AnimatedLike, name: string, fallback: TrackValue): TrackValue {
+/**
+ * Samples an animation track at the instance's current frame. Returns null when the track doesn't
+ * apply. The result may be a shared scratch array, so read it before sampling again.
+ */
+function sampleRaw(instance: MdxInstance, object: AnimatedLike, name: string): TrackValue | null {
   const track = trackMap(object).get(name);
-  if (!track || instance.sequenceIndex < 0) return fallback;
+  if (!track || instance.sequenceIndex < 0) return null;
   let start = 0;
   let end = 0;
   let frame = instance.frameMs;
+  const frames = track.frames;
+  let lo: number;
+  let n: number;
   if (track.globalSequenceId !== -1 && instance.model.source.globalSequences[track.globalSequenceId] !== undefined) {
     end = instance.model.source.globalSequences[track.globalSequenceId];
     frame = end > 0 ? instance.globalMs % end : 0;
+    lo = 0;
+    n = frames.length;
   } else {
     const interval = instance.sequence?.interval;
-    if (!interval) return fallback;
+    if (!interval) return null;
     start = interval[0];
     end = interval[1];
-  }
-  const frames = track.frames;
-  const keyIndices: number[] = [];
-  for (let i = 0; i < frames.length; i++) {
-    const f = frames[i];
-    if (track.globalSequenceId !== -1 || (f >= start && f <= end)) keyIndices.push(i);
-  }
-  if (keyIndices.length === 0) return fallback;
-  if (keyIndices.length === 1 || frame < frames[keyIndices[0]]) return track.values[keyIndices[0]];
-  let a = keyIndices[keyIndices.length - 1];
-  let b = keyIndices[0];
-  for (let i = 1; i < keyIndices.length; i++) {
-    const idx = keyIndices[i];
-    if (frames[idx] > frame) {
-      a = keyIndices[i - 1];
-      b = idx;
-      break;
+    if (track.globalSequenceId !== -1) {
+      lo = 0;
+      n = frames.length;
+    } else {
+      const r = keyRange(track, start, end);
+      lo = Math.floor(r / 65536);
+      n = r % 65536;
     }
+  }
+  if (n === 0) return null;
+  if (n === 1 || frame < frames[lo]) return track.values[lo];
+  const hi = lo + n - 1;
+  let a = hi;
+  let b = lo;
+  if (frame < frames[hi]) {
+    let l = lo + 1;
+    let h = hi;
+    while (l < h) {
+      const m = (l + h) >> 1;
+      if (frames[m] > frame) h = m;
+      else l = m + 1;
+    }
+    a = l - 1;
+    b = l;
   }
   let fa = frames[a];
   const fb = frames[b];
@@ -179,11 +222,15 @@ function sampleTrack(instance: MdxInstance, object: AnimatedLike, name: string, 
   return interpolateTrack(track, a, b, t);
 }
 
+function sampleTrack(instance: MdxInstance, object: AnimatedLike, name: string, fallback: TrackValue): TrackValue {
+  return sampleRaw(instance, object, name) ?? fallback;
+}
+
 function interpolateTrack(track: AnimationTrack, a: number, b: number, t: number): TrackValue {
   const av = track.values[a];
   const bv = track.values[b];
   if (av.length === 1) {
-    const out = new Float32Array(1);
+    const out = scratch[1];
     const at = av[0];
     const bt = bv[0];
     if (track.interpolationType === 2 || track.interpolationType === 3) {
@@ -192,12 +239,17 @@ function interpolateTrack(track: AnimationTrack, a: number, b: number, t: number
     return out;
   }
   if (av.length === 4) {
-    const qa = new THREE.Quaternion(av[0], av[1], av[2], av[3]).normalize();
-    const qb = new THREE.Quaternion(bv[0], bv[1], bv[2], bv[3]).normalize();
+    qa.set(av[0], av[1], av[2], av[3]).normalize();
+    qb.set(bv[0], bv[1], bv[2], bv[3]).normalize();
     qa.slerp(qb, t);
-    return new Float32Array([qa.x, qa.y, qa.z, qa.w]);
+    const out = scratch[4];
+    out[0] = qa.x;
+    out[1] = qa.y;
+    out[2] = qa.z;
+    out[3] = qa.w;
+    return out;
   }
-  const out = new Float32Array(av.length);
+  const out = scratch[av.length] ?? new Float32Array(av.length);
   for (let i = 0; i < av.length; i++) out[i] = THREE.MathUtils.lerp(av[i], bv[i], t);
   return out;
 }
@@ -209,17 +261,20 @@ function hermite(a: number, at: number, bt: number, b: number, t: number): numbe
 }
 
 function sampleScalar(instance: MdxInstance, object: AnimatedLike, name: string, fallback: number): number {
-  return sampleTrack(instance, object, name, scalarDefault(name, fallback))[0];
+  const v = sampleRaw(instance, object, name);
+  if (v) return v[0];
+  return name === 'KMTA' || name === 'KGAO' || name === 'KP2V' || name === 'KRVS' ? 1 : fallback;
 }
 
-function sampleVector(instance: MdxInstance, object: AnimatedLike, name: string, fallback: THREE.Vector3): THREE.Vector3 {
-  const v = sampleTrack(instance, object, name, new Float32Array([fallback.x, fallback.y, fallback.z]));
-  return tempV.set(v[0], v[1], v[2]);
+/** Writes the sampled vector (or the fallback) into `out`. */
+function sampleVector(instance: MdxInstance, object: AnimatedLike, name: string, fx: number, fy: number, fz: number, out: THREE.Vector3): THREE.Vector3 {
+  const v = sampleRaw(instance, object, name);
+  return v ? out.set(v[0], v[1], v[2]) : out.set(fx, fy, fz);
 }
 
-function sampleQuat(instance: MdxInstance, object: AnimatedLike, name: string): THREE.Quaternion {
-  const v = sampleTrack(instance, object, name, new Float32Array([0, 0, 0, 1]));
-  return tempQ.set(v[0], v[1], v[2], v[3]).normalize();
+function sampleQuat(instance: MdxInstance, object: AnimatedLike, name: string, out: THREE.Quaternion): THREE.Quaternion {
+  const v = sampleRaw(instance, object, name);
+  return v ? out.set(v[0], v[1], v[2], v[3]).normalize() : out.set(0, 0, 0, 1);
 }
 
 function colorFromArray(a: Float32Array | Uint32Array, fallback: THREE.Color, bgr = false): THREE.Color {
@@ -231,6 +286,8 @@ function layerMaterial(layer: LayerLike, texture: THREE.Texture): THREE.MeshBasi
   const transparent = layer.filterMode > 1 || layer.alpha < 1;
   const mat = new THREE.MeshBasicMaterial({ map: texture, transparent, depthTest: (layer.flags & 64) === 0, depthWrite: (layer.flags & 128) === 0 && layer.filterMode <= 1, side: (layer.flags & 16) !== 0 ? THREE.DoubleSide : THREE.FrontSide, alphaTest: layer.filterMode === 1 ? 0.75 : 0, vertexColors: false });
   mat.name = `mdx-layer-${layer.filterMode}`;
+  // WC3 draws two-sided layers in one pass; three's default two-pass path also re-checks programs every draw.
+  mat.forceSinglePass = true;
   if (layer.filterMode === 3 || layer.filterMode === 4) mat.blending = THREE.AdditiveBlending;
   else if (layer.filterMode === 5 || layer.filterMode === 6) {
     mat.blending = THREE.CustomBlending;
@@ -241,7 +298,7 @@ function layerMaterial(layer: LayerLike, texture: THREE.Texture): THREE.MeshBasi
 }
 
 function particleMaterial(filterMode: number, texture: THREE.Texture): THREE.MeshBasicMaterial {
-  const mat = new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false, side: THREE.DoubleSide, vertexColors: true });
+  const mat = new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false, side: THREE.DoubleSide, vertexColors: true, forceSinglePass: true });
   if (filterMode === 1) mat.blending = THREE.AdditiveBlending;
   else if (filterMode === 2 || filterMode === 3) {
     mat.blending = THREE.CustomBlending;
@@ -269,19 +326,51 @@ async function resolveTexture(model: AnyModel, index: number): Promise<TextureSl
   return { texture, path: tex.path, replaceableId: tex.replaceableId };
 }
 
-function makeGeometry(geoset: GeosetPrepared): MeshSlot['geometry'] {
+function geosetGeometry(geoset: GeosetPrepared): THREE.BufferGeometry {
+  if (geoset.geometry) return geoset.geometry;
   const g = new THREE.BufferGeometry();
-  const count = geoset.positions.length / 3;
-  const p = new Float32Array(count * 3);
-  const n = new Float32Array(count * 3);
-  const pos = new THREE.BufferAttribute(p, 3).setUsage(THREE.DynamicDrawUsage);
-  const nor = new THREE.BufferAttribute(n, 3).setUsage(THREE.DynamicDrawUsage);
-  g.setAttribute('position', pos);
-  g.setAttribute('normal', nor);
+  // Layers are unlit, so there are no normals; meshes aren't frustum culled, so no bounds.
+  g.setAttribute('position', new THREE.BufferAttribute(geoset.positions, 3));
+  g.setAttribute('mdxGroup', new THREE.BufferAttribute(geoset.vertexGroups, 1));
   g.setAttribute('uv', new THREE.BufferAttribute(geoset.uvs, 2));
   g.setIndex(new THREE.BufferAttribute(geoset.indices, 1));
-  g.computeBoundingSphere();
+  geoset.geometry = g;
   return g;
+}
+
+/** Groups that fit in WebGL2's guaranteed 256 vertex uniform vectors at three vec4s each, leaving room for three.js's own. */
+const MAX_UNIFORM_GROUPS = 76;
+
+/**
+ * WC3 skinning: each vertex belongs to one matrix group, whose matrix is the plain average of its bones'.
+ * The averaged palette is uploaded as uniforms (a float texture for very large models; per-frame texture
+ * uploads are much dearer than uniforms through ANGLE). The shader also converts model space (z up) to three.js (y up).
+ */
+function enableGpuSkinning(material: THREE.MeshBasicMaterial, palette: SkinPalette): void {
+  const groups = palette.data.length / 12;
+  const key = palette.texture ? 'tex' : String(groups);
+  material.defines = palette.texture ? { MDX_SKIN_TEX: '' } : { MDX_SKIN_ROWS: groups * 3 };
+  material.onBeforeCompile = (shader) => {
+    if (palette.texture) shader.uniforms.mdxSkin = { value: palette.texture };
+    else shader.uniforms.mdxBones = { value: palette.data };
+    shader.vertexShader = shader.vertexShader
+      .replace('void main() {', `#ifdef MDX_SKIN_TEX
+uniform highp sampler2D mdxSkin;
+vec4 mdxRow(int i) { return texelFetch(mdxSkin, ivec2(i, 0), 0); }
+#else
+uniform vec4 mdxBones[MDX_SKIN_ROWS];
+vec4 mdxRow(int i) { return mdxBones[i]; }
+#endif
+attribute float mdxGroup;
+void main() {`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+      {
+        int b = int(mdxGroup + 0.5) * 3;
+        vec4 p = vec4(transformed, 1.0);
+        transformed = vec3(dot(mdxRow(b), p), dot(mdxRow(b + 2), p), -dot(mdxRow(b + 1), p));
+      }`);
+  };
+  material.customProgramCacheKey = () => `mdx-skin-${key}`;
 }
 
 function normalizedAttachmentName(name: string): string {
@@ -316,6 +405,10 @@ export class MdxModel {
   readonly geosets: GeosetPrepared[] = [];
   readonly nodes: NodeInfo[] = [];
   readonly nodeByObjectId = new Map<number, NodeInfo>();
+  /** Matrix groups deduplicated across geosets (they mostly share the same bones): offsets into groupBones. */
+  groupOffsets = new Uint32Array(1);
+  /** Object IDs of each group's bones. */
+  groupBones = new Uint32Array(0);
 
   constructor(readonly path: string, readonly source: AnyModel) {}
 
@@ -368,19 +461,38 @@ export class MdxModel {
   }
 
   private prepareGeosets(): void {
+    const groupIds = new Map<string, number>();
+    const offsets = [0];
+    const bones: number[] = [];
+    const groupId = (ids: number[]): number => {
+      const key = ids.length ? [...ids].sort((a, b) => a - b).join(',') : 'none';
+      let id = groupIds.get(key);
+      if (id === undefined) {
+        id = offsets.length - 1;
+        groupIds.set(key, id);
+        bones.push(...ids);
+        offsets.push(bones.length);
+      }
+      return id;
+    };
     for (let i = 0; i < this.source.geosets.length; i++) {
       const geoset = this.source.geosets[i];
       const material = this.source.materials[geoset.materialId];
-      const groupOffsets = new Uint32Array(geoset.matrixGroups.length + 1);
-      for (let g = 0; g < geoset.matrixGroups.length; g++) groupOffsets[g + 1] = groupOffsets[g] + geoset.matrixGroups[g];
+      const remap: number[] = [];
+      for (let g = 0, j = 0; g < geoset.matrixGroups.length; j += geoset.matrixGroups[g], g++) remap.push(groupId(Array.from(geoset.matrixIndices.subarray(j, j + geoset.matrixGroups[g]))));
+      const count = geoset.vertices.length / 3;
+      const vertexGroups = new Float32Array(count);
+      for (let v = 0; v < count; v++) vertexGroups[v] = remap[geoset.vertexGroups[v] ?? 0] ?? groupId([]);
       const layers: LayerSlot[] = [];
       for (const layer of material?.layers ?? []) {
         const tex = this.textures[layer.textureId] ?? { texture: getFallbackTexture('unknown'), path: 'unknown', replaceableId: 0 };
         layers.push({ layer, texture: tex, baseMaterial: layerMaterial(layer, tex.texture) });
       }
       const gsa = this.source.geosetAnimations.find((a) => a.geosetId === i) ?? this.source.geosetAnimations.find((a) => a.geosetId === -1) ?? null;
-      this.geosets.push({ geoset, positions: geoset.vertices, normals: geoset.normals, uvs: geoset.uvSets[0] ?? new Float32Array((geoset.vertices.length / 3) * 2), indices: geoset.faces, groupOffsets, layers, geosetAnimation: gsa });
+      this.geosets.push({ geoset, positions: geoset.vertices, normals: geoset.normals, uvs: geoset.uvSets[0] ?? new Float32Array((geoset.vertices.length / 3) * 2), indices: geoset.faces, vertexGroups, layers, geosetAnimation: gsa });
     }
+    this.groupOffsets = Uint32Array.from(offsets);
+    this.groupBones = Uint32Array.from(bones);
   }
 }
 
@@ -395,7 +507,12 @@ export class MdxInstance extends THREE.Object3D {
   readonly nodeStates: NodeState[] = [];
   private readonly nodesById = new Map<number, NodeState>();
   private readonly meshes: MeshSlot[] = [];
+  private readonly skins: SkinSlot[] = [];
+  private palette!: SkinPalette;
+  /** World matrix elements of each entry in model.groupBones (identity for missing bones). */
+  private groupBoneElems: number[][] = [];
   private readonly attachments = new Map<string, THREE.Object3D>();
+  private readonly attachmentLinks: { node: NodeState; obj: THREE.Object3D }[] = [];
   private readonly pe2: ParticleEmitter2View[] = [];
   private readonly ribbons: RibbonEmitterView[] = [];
   private _teamColor = defaultTeam.clone();
@@ -451,7 +568,7 @@ export class MdxInstance extends THREE.Object3D {
     this.loop = loop ?? (seq ? !seq.nonLooping : true);
     for (const e of this.pe2) e.clear();
     for (const r of this.ribbons) r.clear();
-    this.update(0, new THREE.PerspectiveCamera());
+    this.update(0, setupCamera);
   }
 
   /** Advances animation, node transforms, skinning, particle emitters, ribbons, and attachments. */
@@ -486,8 +603,8 @@ export class MdxInstance extends THREE.Object3D {
   }
 
   dispose(): void {
+    this.palette.texture?.dispose();
     for (const m of this.meshes) {
-      m.geometry.dispose();
       if (m.mapWasCloned) m.material.map?.dispose();
       m.material.dispose();
     }
@@ -507,9 +624,19 @@ export class MdxInstance extends THREE.Object3D {
   }
 
   private buildMeshes(): void {
+    const model = this.model;
+    const groups = Math.max(1, model.groupOffsets.length - 1);
+    // Round up so models share a few program variants.
+    const slots = groups <= 8 ? 8 : groups <= 32 ? 32 : groups <= MAX_UNIFORM_GROUPS ? MAX_UNIFORM_GROUPS : groups;
+    const data = new Float32Array(slots * 12);
+    this.palette = { data, texture: slots > MAX_UNIFORM_GROUPS ? new THREE.DataTexture(data, slots * 3, 1, THREE.RGBAFormat, THREE.FloatType) : null };
+    this.groupBoneElems = Array.from(model.groupBones, (id) => (this.nodesById.get(id)?.world ?? identity).elements);
     for (const geoset of this.model.geosets) {
+      if (!geoset.layers.length) continue;
+      const geometry = geosetGeometry(geoset);
+      const skin: SkinSlot = { geoset, layers: [] };
+      this.skins.push(skin);
       for (const layer of geoset.layers) {
-        const geometry = makeGeometry(geoset);
         const material = layer.baseMaterial.clone();
         let mapWasCloned = false;
         if (layer.layer.textureAnimationId >= 0 && material.map) {
@@ -519,10 +646,13 @@ export class MdxInstance extends THREE.Object3D {
         }
         if (layer.texture.replaceableId === 1) material.map = this.teamColorTexture;
         else if (layer.texture.replaceableId === 2) material.map = this.teamGlowTexture;
+        enableGpuSkinning(material, this.palette);
         const mesh = new THREE.Mesh(geometry, material);
         mesh.frustumCulled = false;
         this.add(mesh);
-        this.meshes.push({ geoset, geometry, mesh, positionAttr: geometry.getAttribute('position') as THREE.BufferAttribute, normalAttr: geometry.getAttribute('normal') as THREE.BufferAttribute, material, layer, mapWasCloned });
+        const slot: MeshSlot = { geoset, mesh, material, layer, mapWasCloned };
+        this.meshes.push(slot);
+        skin.layers.push(slot);
       }
     }
   }
@@ -534,6 +664,11 @@ export class MdxInstance extends THREE.Object3D {
       obj.matrixAutoUpdate = false;
       this.add(obj);
       this.attachments.set(normalizedAttachmentName(att.name), obj);
+    }
+    for (const att of this.model.source.attachments) {
+      const node = this.nodesById.get(att.objectId);
+      const obj = this.attachments.get(normalizedAttachmentName(att.name));
+      if (node && obj) this.attachmentLinks.push({ node, obj });
     }
   }
 
@@ -554,9 +689,9 @@ export class MdxInstance extends THREE.Object3D {
     camera.updateMatrixWorld();
     for (const node of this.nodeStates) {
       const obj = node.object;
-      const t = sampleVector(this, obj, 'KGTR', new THREE.Vector3());
-      const r = sampleQuat(this, obj, 'KGRT');
-      const s = sampleVector(this, obj, 'KGSC', new THREE.Vector3(1, 1, 1));
+      const t = sampleVector(this, obj, 'KGTR', 0, 0, 0, tempT);
+      const r = sampleQuat(this, obj, 'KGRT', tempR);
+      const s = sampleVector(this, obj, 'KGSC', 1, 1, 1, tempSc);
       tempM.makeTranslation(node.pivot.x + t.x, node.pivot.y + t.y, node.pivot.z + t.z);
       tempM.multiply(tempM2.makeRotationFromQuaternion(r));
       tempM.scale(s);
@@ -586,57 +721,60 @@ export class MdxInstance extends THREE.Object3D {
   }
 
   private updateAttachments(): void {
-    for (const att of this.model.source.attachments) {
-      const node = this.nodesById.get(att.objectId);
-      const obj = this.attachments.get(normalizedAttachmentName(att.name));
-      if (node && obj) {
-        obj.visible = node.visible > 0.01;
-        obj.matrix.copy(node.worldConverted);
-        obj.matrixWorldNeedsUpdate = true;
-      }
+    for (const { node, obj } of this.attachmentLinks) {
+      obj.visible = node.visible > 0.01;
+      obj.matrix.copy(node.worldConverted);
+      obj.matrixWorldNeedsUpdate = true;
     }
   }
 
   private updateGeosets(): void {
-    for (const slot of this.meshes) {
-      const geoset = slot.geoset;
-      const source = geoset.geoset;
-      const pos = slot.positionAttr.array as Float32Array;
-      const nor = slot.normalAttr.array as Float32Array;
-      const original = geoset.positions;
-      const originalN = geoset.normals;
-      for (let i = 0, l = original.length / 3; i < l; i++) {
-        const group = source.vertexGroups[i] ?? 0;
-        const start = geoset.groupOffsets[group] ?? 0;
-        const end = geoset.groupOffsets[group + 1] ?? start;
-        const count = Math.max(1, end - start);
-        tempV.set(0, 0, 0);
-        tempV2.set(0, 0, 0);
-        for (let j = start; j < end; j++) {
-          const objectId = source.matrixIndices[j];
-          const node = this.nodesById.get(objectId);
-          const m = node?.world ?? tempM.identity();
-          const v = new THREE.Vector3(original[i * 3], original[i * 3 + 1], original[i * 3 + 2]).applyMatrix4(m);
-          tempV.add(v);
-          const n = new THREE.Vector3(originalN[i * 3] || 0, originalN[i * 3 + 1] || 0, originalN[i * 3 + 2] || 1).transformDirection(m);
-          tempV2.add(n);
-        }
-        tempV.multiplyScalar(1 / count);
-        tempV2.multiplyScalar(1 / count).normalize();
-        modelToThree(tempV);
-        directionToThree(tempV2).normalize();
-        pos[i * 3] = tempV.x;
-        pos[i * 3 + 1] = tempV.y;
-        pos[i * 3 + 2] = tempV.z;
-        nor[i * 3] = tempV2.x;
-        nor[i * 3 + 1] = tempV2.y;
-        nor[i * 3 + 2] = tempV2.z;
+    let shown = false;
+    for (const skin of this.skins) {
+      for (const slot of skin.layers) {
+        this.updateMaterial(slot);
+        slot.mesh.visible = slot.material.opacity > 0.002;
+        shown ||= slot.mesh.visible;
       }
-      slot.positionAttr.needsUpdate = true;
-      slot.normalAttr.needsUpdate = true;
-      slot.geometry.computeBoundingSphere();
-      this.updateMaterial(slot);
     }
+    if (shown && this.visible) this.updatePalette();
+  }
+
+  private updatePalette(): void {
+    const offsets = this.model.groupOffsets;
+    const bones = this.groupBoneElems;
+    const pal = this.palette.data;
+    for (let g = 0, groups = offsets.length - 1; g < groups; g++) {
+      const start = offsets[g];
+      const end = offsets[g + 1];
+      const o = g * 12;
+      if (end === start) {
+        pal.fill(0, o, o + 12);
+        pal[o] = pal[o + 5] = pal[o + 10] = 1;
+        continue;
+      }
+      // Column-major source; row r of the palette entry is (e[r], e[4 + r], e[8 + r], e[12 + r]).
+      const inv = 1 / (end - start);
+      let e = bones[start];
+      for (let r = 0; r < 3; r++) {
+        pal[o + r * 4] = e[r];
+        pal[o + r * 4 + 1] = e[4 + r];
+        pal[o + r * 4 + 2] = e[8 + r];
+        pal[o + r * 4 + 3] = e[12 + r];
+      }
+      if (end - start === 1) continue;
+      for (let j = start + 1; j < end; j++) {
+        e = bones[j];
+        for (let r = 0; r < 3; r++) {
+          pal[o + r * 4] += e[r];
+          pal[o + r * 4 + 1] += e[4 + r];
+          pal[o + r * 4 + 2] += e[8 + r];
+          pal[o + r * 4 + 3] += e[12 + r];
+        }
+      }
+      for (let k = 0; k < 12; k++) pal[o + k] *= inv;
+    }
+    if (this.palette.texture) this.palette.texture.needsUpdate = true;
   }
 
   private updateMaterial(slot: MeshSlot): void {
@@ -645,7 +783,7 @@ export class MdxInstance extends THREE.Object3D {
     const layerAlpha = sampleScalar(this, layer, 'KMTA', layer.alpha);
     const geosetAlpha = geoa ? sampleScalar(this, geoa, 'KGAO', geoa.alpha) : 1;
     const colorTrack = geoa ? sampleTrack(this, geoa, 'KGAC', geoa.color) : null;
-    const color = colorTrack ? colorFromArray(colorTrack, new THREE.Color(1, 1, 1), true) : new THREE.Color(1, 1, 1);
+    const color = colorTrack && colorTrack.length >= 3 ? tempColor.setRGB(colorTrack[2], colorTrack[1], colorTrack[0]) : tempColor.setRGB(1, 1, 1);
     const replaceableScale = slot.layer.texture.replaceableId === 2 ? 0.38 : 1;
     slot.material.opacity = THREE.MathUtils.clamp(layerAlpha * geosetAlpha * this.opacity * replaceableScale, 0, 1);
     slot.material.transparent = slot.material.opacity < 0.999 || layer.filterMode > 1;
@@ -655,19 +793,67 @@ export class MdxInstance extends THREE.Object3D {
 
   private updateTextureTransform(texture: THREE.Texture, tx: AnimatedLike | undefined): void {
     if (!tx) return;
-    const t = sampleVector(this, tx, 'KTAT', new THREE.Vector3());
-    const r = sampleQuat(this, tx, 'KTAR');
-    const s = sampleVector(this, tx, 'KTAS', new THREE.Vector3(1, 1, 1));
+    const t = sampleVector(this, tx, 'KTAT', 0, 0, 0, tempT);
+    const r = sampleQuat(this, tx, 'KTAR', tempR);
+    const s = sampleVector(this, tx, 'KTAS', 1, 1, 1, tempSc);
     texture.offset.set(t.x, t.y);
     texture.repeat.set(s.x || 1, s.y || 1);
-    texture.rotation = new THREE.Euler().setFromQuaternion(r).z;
+    texture.rotation = tempEuler.setFromQuaternion(r).z;
+  }
+}
+
+/**
+ * Growable vertex buffers for camera-facing quads or ribbon strips. Buffers are reused between
+ * frames and only the used range is uploaded, instead of reallocating GPU buffers every frame.
+ */
+class DynamicMesh {
+  readonly geometry = new THREE.BufferGeometry();
+  positions = new Float32Array(0);
+  uvs = new Float32Array(0);
+  colors = new Float32Array(0);
+  private cap = 0;
+
+  constructor(private readonly kind: 'quads' | 'strip') {}
+
+  /** Makes room for `n` quads (or `n` strip points). */
+  ensure(n: number): void {
+    if (n <= this.cap) return;
+    const cap = Math.max(16, 2 ** Math.ceil(Math.log2(n)));
+    const verts = this.kind === 'quads' ? cap * 4 : cap * 2;
+    this.geometry.dispose();
+    this.positions = new Float32Array(verts * 3);
+    this.uvs = new Float32Array(verts * 2);
+    this.colors = new Float32Array(verts * 4);
+    const index = new Uint16Array(this.kind === 'quads' ? cap * 6 : Math.max(0, cap - 1) * 6);
+    for (let i = 0; i * 6 < index.length; i++) {
+      const b = this.kind === 'quads' ? i * 4 : i * 2;
+      if (this.kind === 'quads') index.set([b, b + 1, b + 2, b, b + 2, b + 3], i * 6);
+      else index.set([b, b + 1, b + 2, b + 1, b + 3, b + 2], i * 6);
+    }
+    this.geometry.setAttribute('position', new THREE.BufferAttribute(this.positions, 3).setUsage(THREE.DynamicDrawUsage));
+    this.geometry.setAttribute('uv', new THREE.BufferAttribute(this.uvs, 2).setUsage(THREE.DynamicDrawUsage));
+    this.geometry.setAttribute('color', new THREE.BufferAttribute(this.colors, 4).setUsage(THREE.DynamicDrawUsage));
+    this.geometry.setIndex(new THREE.BufferAttribute(index, 1));
+    this.cap = cap;
+  }
+
+  /** Uploads the first `verts` vertices and draws `indices` indices. */
+  commit(verts: number, indices: number): void {
+    this.geometry.setDrawRange(0, indices);
+    if (verts === 0) return;
+    for (const name of ['position', 'uv', 'color']) {
+      const attr = this.geometry.getAttribute(name) as THREE.BufferAttribute;
+      attr.clearUpdateRanges();
+      attr.addUpdateRange(0, verts * attr.itemSize);
+      attr.needsUpdate = true;
+    }
   }
 }
 
 class ParticleEmitter2View {
   private readonly particles: Particle2[] = [];
   private readonly mesh: THREE.Mesh;
-  private readonly geometry = new THREE.BufferGeometry();
+  private readonly buffers = new DynamicMesh('quads');
   private emission = 0;
   private lastKey = -1;
   private readonly material: THREE.MeshBasicMaterial;
@@ -680,8 +866,9 @@ class ParticleEmitter2View {
       ? getFallbackTexture(modelTex?.path ?? emitter.name, emitter.rows, emitter.columns)
       : (baseTex ?? getFallbackTexture(modelTex?.path ?? emitter.name, emitter.rows, emitter.columns));
     this.material = particleMaterial(emitter.filterMode, this.texture);
-    this.mesh = new THREE.Mesh(this.geometry, this.material);
+    this.mesh = new THREE.Mesh(this.buffers.geometry, this.material);
     this.mesh.frustumCulled = false;
+    this.mesh.visible = false;
     this.mesh.renderOrder = emitter.filterMode === 1 ? 30 : 20;
     instance.add(this.mesh);
   }
@@ -690,11 +877,11 @@ class ParticleEmitter2View {
     this.particles.length = 0;
     this.emission = 0;
     this.lastKey = -1;
-    this.rebuild(new THREE.PerspectiveCamera());
+    this.mesh.visible = false;
   }
 
   dispose(): void {
-    this.geometry.dispose();
+    this.buffers.geometry.dispose();
     this.material.dispose();
   }
 
@@ -711,15 +898,17 @@ class ParticleEmitter2View {
       this.emission -= emitCount;
       for (let i = 0; i < emitCount; i++) this.emit();
     }
-    for (let i = this.particles.length - 1; i >= 0; i--) {
+    let live = 0;
+    for (let i = 0; i < this.particles.length; i++) {
       const p = this.particles[i];
       p.health -= dt;
-      if (p.health <= 0) this.particles.splice(i, 1);
-      else {
+      if (p.health > 0) {
         p.velocity.z -= p.gravity * dt;
         p.location.addScaledVector(p.velocity, dt);
+        this.particles[live++] = p;
       }
     }
+    this.particles.length = live;
     this.rebuild(camera);
   }
 
@@ -754,72 +943,83 @@ class ParticleEmitter2View {
 
   private rebuild(camera: THREE.Camera): void {
     const count = this.particles.length;
-    const positions = new Float32Array(count * 12);
-    const uvs = new Float32Array(count * 8);
-    const colors = new Float32Array(count * 16);
-    const indices = new Uint16Array(count * 6);
-    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
-    const up = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+    this.mesh.visible = count > 0;
+    if (count === 0) return;
+    const buf = this.buffers;
+    buf.ensure(count);
+    const positions = buf.positions;
+    const uvs = buf.uvs;
+    const colors = buf.colors;
     this.instance.updateWorldMatrix(true, false);
-    const inv = this.instance.matrixWorld.clone().invert();
-    right.transformDirection(inv).normalize();
-    up.transformDirection(inv).normalize();
+    const inv = tempM.copy(this.instance.matrixWorld).invert();
+    const right = tempT.set(1, 0, 0).applyQuaternion(camera.quaternion).transformDirection(inv);
+    const up = tempSc.set(0, 1, 0).applyQuaternion(camera.quaternion).transformDirection(inv);
+    const e = this.emitter;
+    const middle = THREE.MathUtils.clamp(e.timeMiddle, 0.001, 0.999);
+    const fade = this.instance.opacity;
+    const facingQuads = (e.flags & 1048576) !== 0;
+    const tailLen = e.tailLength * 0.35;
     for (let i = 0; i < count; i++) {
       const p = this.particles[i];
       const age = 1 - p.health / Math.max(0.001, p.life);
-      const scale = this.segmentScale(age);
-      const col = this.segmentColor(age);
-      const loc = modelToThree(p.location.clone());
-      const half = Math.max(1, scale * 0.5);
-      const tailDir = p.tail ? directionToThree(p.velocity.clone()).normalize().multiplyScalar(this.emitter.tailLength * 0.35) : new THREE.Vector3();
-      let quadRight = right;
-      let quadUp = up;
-      if (this.emitter.flags & 1048576) {
+      const second = age >= middle;
+      const i0 = second ? 1 : 0;
+      const f = second ? (age - middle) / (1 - middle) : age / middle;
+      const half = Math.max(1, THREE.MathUtils.lerp(e.segmentScaling[i0], e.segmentScaling[i0 + 1], f) * 0.5);
+      const c0 = e.segmentColors[i0];
+      const c1 = e.segmentColors[i0 + 1];
+      const cr = c0[0] + (c1[0] - c0[0]) * f;
+      const cg = c0[1] + (c1[1] - c0[1]) * f;
+      const cb = c0[2] + (c1[2] - c0[2]) * f;
+      const ca = THREE.MathUtils.lerp(e.segmentAlphas[i0] / 255, e.segmentAlphas[i0 + 1] / 255, f) * fade;
+      // Model (z up) to three.js (y up).
+      const lx = p.location.x;
+      const ly = p.location.z;
+      const lz = -p.location.y;
+      let rx = right.x * half, ry = right.y * half, rz = right.z * half;
+      let ux = up.x * half, uy = up.y * half, uz = up.z * half;
+      if (facingQuads) {
         const facing = Math.atan2(p.velocity.y, p.velocity.x);
-        quadRight = new THREE.Vector3(Math.cos(facing), 0, -Math.sin(facing));
-        quadUp = new THREE.Vector3(Math.sin(facing), 0, Math.cos(facing));
+        const cs = Math.cos(facing);
+        const sn = Math.sin(facing);
+        rx = cs * half; ry = 0; rz = -sn * half;
+        ux = sn * half; uy = 0; uz = cs * half;
       }
-      const r = quadRight.clone().multiplyScalar(half);
-      const u = quadUp.clone().multiplyScalar(half);
-      const verts = [loc.clone().sub(r).sub(u), loc.clone().add(r).sub(u), loc.clone().add(r).add(u).sub(tailDir), loc.clone().sub(r).add(u).sub(tailDir)];
-      for (let v = 0; v < 4; v++) {
-        positions.set([verts[v].x, verts[v].y, verts[v].z], i * 12 + v * 3);
-        colors.set([col.r, col.g, col.b, col.a], i * 16 + v * 4);
+      let tx = 0, ty = 0, tz = 0;
+      if (p.tail) {
+        const vx = p.velocity.x, vy = p.velocity.z, vz = -p.velocity.y;
+        const len = Math.hypot(vx, vy, vz) || 1;
+        tx = (vx / len) * tailLen; ty = (vy / len) * tailLen; tz = (vz / len) * tailLen;
       }
-      const [u0, v0, u1, v1] = this.uvFor(p, age);
-      uvs.set([u0, v1, u1, v1, u1, v0, u0, v0], i * 8);
-      const b = i * 4;
-      indices.set([b, b + 1, b + 2, b, b + 2, b + 3], i * 6);
+      const o = i * 12;
+      positions[o] = lx - rx - ux; positions[o + 1] = ly - ry - uy; positions[o + 2] = lz - rz - uz;
+      positions[o + 3] = lx + rx - ux; positions[o + 4] = ly + ry - uy; positions[o + 5] = lz + rz - uz;
+      positions[o + 6] = lx + rx + ux - tx; positions[o + 7] = ly + ry + uy - ty; positions[o + 8] = lz + rz + uz - tz;
+      positions[o + 9] = lx - rx + ux - tx; positions[o + 10] = ly - ry + uy - ty; positions[o + 11] = lz - rz + uz - tz;
+      for (let v = 0, c = i * 16; v < 4; v++, c += 4) {
+        colors[c] = cr;
+        colors[c + 1] = cg;
+        colors[c + 2] = cb;
+        colors[c + 3] = ca;
+      }
+      const cell = this.cellFor(p, age);
+      const cols = Math.max(1, e.columns);
+      const rows = Math.max(1, e.rows);
+      const u0 = (cell % cols) / cols;
+      const v0 = Math.floor(cell / cols) / rows;
+      const u1 = u0 + 1 / cols;
+      const v1 = v0 + 1 / rows;
+      const q = i * 8;
+      uvs[q] = u0; uvs[q + 1] = v1;
+      uvs[q + 2] = u1; uvs[q + 3] = v1;
+      uvs[q + 4] = u1; uvs[q + 5] = v0;
+      uvs[q + 6] = u0; uvs[q + 7] = v0;
     }
-    this.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    this.geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-    this.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 4));
-    this.geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-    this.geometry.computeBoundingSphere();
-  }
-
-  private segmentColor(t: number): THREE.Color & { a: number } {
-    const middle = THREE.MathUtils.clamp(this.emitter.timeMiddle, 0.001, 0.999);
-    const i0 = t < middle ? 0 : 1;
-    const i1 = t < middle ? 1 : 2;
-    const f = t < middle ? t / middle : (t - middle) / (1 - middle);
-    const c0 = this.emitter.segmentColors[i0];
-    const c1 = this.emitter.segmentColors[i1];
-    const c = new THREE.Color(THREE.MathUtils.lerp(c0[0], c1[0], f), THREE.MathUtils.lerp(c0[1], c1[1], f), THREE.MathUtils.lerp(c0[2], c1[2], f)) as THREE.Color & { a: number };
-    c.a = THREE.MathUtils.lerp(this.emitter.segmentAlphas[i0] / 255, this.emitter.segmentAlphas[i1] / 255, f) * this.instance.opacity;
-    return c;
-  }
-
-  private segmentScale(t: number): number {
-    const middle = THREE.MathUtils.clamp(this.emitter.timeMiddle, 0.001, 0.999);
-    const i0 = t < middle ? 0 : 1;
-    const i1 = t < middle ? 1 : 2;
-    const f = t < middle ? t / middle : (t - middle) / (1 - middle);
-    return THREE.MathUtils.lerp(this.emitter.segmentScaling[i0], this.emitter.segmentScaling[i1], f);
+    buf.commit(count * 4, count * 6);
   }
 
   /** Sprite-sheet cell for a particle at life fraction t, as WC3 picks it (see mdx-m3-viewer's getCell). */
-  private uvFor(p: Particle2, t: number): [number, number, number, number] {
+  private cellFor(p: Particle2, t: number): number {
     const cols = Math.max(1, this.emitter.columns);
     const rows = Math.max(1, this.emitter.rows);
     let cell: number;
@@ -835,15 +1035,13 @@ class ParticleEmitter2View {
       const repeat = interval?.[2] ?? 1;
       cell = count > 0 ? Math.min(start + (Math.floor(count * repeat * f) % count), rows * cols - 1) : start;
     }
-    const col = cell % cols;
-    const row = Math.floor(cell / cols);
-    return [col / cols, row / rows, (col + 1) / cols, (row + 1) / rows];
+    return cell;
   }
 }
 
 class RibbonEmitterView {
   private readonly points: RibbonPoint[] = [];
-  private readonly geometry = new THREE.BufferGeometry();
+  private readonly buffers = new DynamicMesh('strip');
   private readonly material: THREE.MeshBasicMaterial;
   private readonly mesh: THREE.Mesh;
   private emission = 0;
@@ -853,19 +1051,20 @@ class RibbonEmitterView {
     const slot = mat ? instance.model.textures[mat.textureId] : undefined;
     const tex = slot?.texture.name.startsWith('fallback:') ? getFallbackTexture(slot.path, emitter.rows, emitter.columns) : slot?.texture;
     this.material = particleMaterial(mat?.filterMode ?? 2, tex ?? getFallbackTexture(emitter.name, emitter.rows, emitter.columns));
-    this.mesh = new THREE.Mesh(this.geometry, this.material);
+    this.mesh = new THREE.Mesh(this.buffers.geometry, this.material);
     this.mesh.frustumCulled = false;
+    this.mesh.visible = false;
     this.mesh.renderOrder = 25;
     instance.add(this.mesh);
   }
 
   clear(): void {
     this.points.length = 0;
-    this.rebuild();
+    this.mesh.visible = false;
   }
 
   dispose(): void {
-    this.geometry.dispose();
+    this.buffers.geometry.dispose();
     this.material.dispose();
   }
 
@@ -877,13 +1076,15 @@ class RibbonEmitterView {
         this.spawn();
       }
     }
-    for (let i = this.points.length - 1; i >= 0; i--) {
+    let live = 0;
+    for (let i = 0; i < this.points.length; i++) {
       const p = this.points[i];
       p.health -= dt;
       p.above.z -= this.emitter.gravity * dt * dt;
       p.below.z -= this.emitter.gravity * dt * dt;
-      if (p.health <= 0) this.points.splice(i, 1);
+      if (p.health > 0) this.points[live++] = p;
     }
+    this.points.length = live;
     this.rebuild();
   }
 
@@ -901,34 +1102,34 @@ class RibbonEmitterView {
   }
 
   private rebuild(): void {
-    const segments = Math.max(0, this.points.length - 1);
-    const positions = new Float32Array(this.points.length * 6);
-    const uvs = new Float32Array(this.points.length * 4);
-    const colors = new Float32Array(this.points.length * 8);
-    const indices = new Uint16Array(segments * 6);
-    for (let i = 0; i < this.points.length; i++) {
+    const n = this.points.length;
+    this.mesh.visible = n > 1;
+    if (n < 2) return;
+    const buf = this.buffers;
+    buf.ensure(n);
+    const { positions, uvs, colors } = buf;
+    const cols = Math.max(1, this.emitter.columns);
+    const cw = 1 / cols;
+    const ch = 1 / Math.max(1, this.emitter.rows);
+    for (let i = 0; i < n; i++) {
       const p = this.points[i];
-      const a = modelToThree(p.above.clone());
-      const b = modelToThree(p.below.clone());
-      positions.set([a.x, a.y, a.z, b.x, b.y, b.z], i * 6);
-      const u = i / Math.max(1, this.points.length - 1);
-      const row = Math.floor(p.slot / Math.max(1, this.emitter.columns));
-      const col = p.slot % Math.max(1, this.emitter.columns);
-      const cw = 1 / Math.max(1, this.emitter.columns);
-      const ch = 1 / Math.max(1, this.emitter.rows);
-      uvs.set([col * cw + u * cw, row * ch, col * cw + u * cw, (row + 1) * ch], i * 4);
+      const o = i * 6;
+      positions[o] = p.above.x; positions[o + 1] = p.above.z; positions[o + 2] = -p.above.y;
+      positions[o + 3] = p.below.x; positions[o + 4] = p.below.z; positions[o + 5] = -p.below.y;
+      const u = i / (n - 1);
+      const row = Math.floor(p.slot / cols);
+      const col = p.slot % cols;
+      const q = i * 4;
+      uvs[q] = col * cw + u * cw; uvs[q + 1] = row * ch;
+      uvs[q + 2] = col * cw + u * cw; uvs[q + 3] = (row + 1) * ch;
       const alpha = p.alpha * (p.health / p.life) * this.instance.opacity;
-      colors.set([p.color.r, p.color.g, p.color.b, alpha, p.color.r, p.color.g, p.color.b, alpha], i * 8);
-      if (i < this.points.length - 1) {
-        const v = i * 2;
-        indices.set([v, v + 1, v + 2, v + 1, v + 3, v + 2], i * 6);
-      }
+      const c = i * 8;
+      colors[c] = colors[c + 4] = p.color.r;
+      colors[c + 1] = colors[c + 5] = p.color.g;
+      colors[c + 2] = colors[c + 6] = p.color.b;
+      colors[c + 3] = colors[c + 7] = alpha;
     }
-    this.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    this.geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-    this.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 4));
-    this.geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-    this.geometry.computeBoundingSphere();
+    buf.commit(n * 2, (n - 1) * 6);
   }
 }
 

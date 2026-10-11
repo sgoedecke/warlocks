@@ -12,7 +12,13 @@ import { SoundSystem, type Sfx } from './audio';
 import { addFiles, assetStatus, initAssets, onAssetStatus, removeArchive, type ArchiveRole, type AssetStatus } from './assets/loader';
 import { clearMdxCache } from './render/mdx';
 
-interface Settings {
+/** Dev-only overrides of the graphics preset, for benchmarking. */
+interface GraphicsOverrides {
+  frameCap?: number;
+  pixelRatio?: number;
+}
+
+interface Settings extends GraphicsOverrides {
   name: string;
   color: number;
   bots: number;
@@ -26,22 +32,40 @@ interface Settings {
   quickCast: boolean;
   lockCamera: boolean;
   volume: number;
+  graphics: GraphicsPreset;
+  /** MSAA costs roughly a quarter of the GPU time per frame; classic WC3 had none either. */
+  antialias: boolean;
 }
+
+type GraphicsPreset = 'saver' | 'balanced' | 'high';
+/**
+ * Frame cap (0 = every display refresh) and the highest device pixel ratio the 3D view renders at.
+ * GPU cost scales with pixels drawn, so these two settings set most of the game's power draw.
+ */
+const GRAPHICS: Record<GraphicsPreset, { label: string; frameCap: number; pixelRatio: number }> = {
+  saver: { label: 'Battery saver (30 fps)', frameCap: 30, pixelRatio: 1 },
+  balanced: { label: 'Balanced (60 fps)', frameCap: 60, pixelRatio: 1.5 },
+  high: { label: 'High (display rate)', frameCap: 0, pixelRatio: 2 },
+};
 
 const DEFAULTS: Settings = {
   name: 'Player', color: 0, bots: 5, difficulty: 'normal', rounds: 10, mode: 'round', pointLimit: 20, teams: 'ffa', arenaShape: 'square', startingGold: 10, quickCast: false, lockCamera: false, volume: 0.6,
+  graphics: 'balanced', antialias: true,
 };
 
 function loadSettings(): Settings {
   try {
-    return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('warlocks.settings') ?? '{}') };
+    const s: Settings = { ...DEFAULTS, ...JSON.parse(localStorage.getItem('warlocks.settings') ?? '{}') };
+    if (!(s.graphics in GRAPHICS)) s.graphics = DEFAULTS.graphics;
+    return s;
   } catch {
     return { ...DEFAULTS };
   }
 }
 
 function saveSettings(s: Settings) {
-  localStorage.setItem('warlocks.settings', JSON.stringify(s));
+  const { frameCap: _f, pixelRatio: _p, ...persisted } = s;
+  localStorage.setItem('warlocks.settings', JSON.stringify(persisted));
 }
 
 const sound = new SoundSystem();
@@ -71,6 +95,7 @@ class Game {
   private paused = false;
   private lockCamera: boolean;
   private disposers: (() => void)[] = [];
+  private frameCap: number;
 
   constructor(private settings: Settings, private onExit: (again: boolean) => void) {
     const players: PlayerSetup[] = [{ name: settings.name || 'Player', color: settings.color, isBot: false }];
@@ -89,7 +114,9 @@ class Game {
     this.root.appendChild(viewport);
     app.appendChild(this.root);
 
-    this.renderer = new GameRenderer(viewport, this.sim, this.localId);
+    const gfx = GRAPHICS[settings.graphics];
+    this.frameCap = settings.frameCap ?? gfx.frameCap;
+    this.renderer = new GameRenderer(viewport, this.sim, this.localId, { pixelRatio: settings.pixelRatio ?? gfx.pixelRatio, antialias: settings.antialias });
     this.hud = new Hud(this.root, this.sim, this.localId, this.renderer, {
       onSpell: (id) => this.activateSpell(id),
       onBuy: (id) => {
@@ -127,6 +154,7 @@ class Game {
 
   private exit(again: boolean) {
     cancelAnimationFrame(this.raf);
+    clearTimeout(this.wakeTimer);
     for (const d of this.disposers) d();
     this.hud.dispose();
     this.renderer.dispose();
@@ -372,8 +400,47 @@ class Game {
     }
   }
 
-  private frame = (now: number) => {
-    this.raf = requestAnimationFrame(this.frame);
+  private nextFrame = 0;
+
+  private wakeTimer = 0;
+  private timerWake = false;
+
+  /**
+   * Requests the next frame. When the next frame slot is well in the future, sleep on a timer first:
+   * an idle page lets Chrome stop producing begin-frames, whereas skipped rAF callbacks still wake every vsync.
+   */
+  private scheduleFrame(now: number) {
+    const wait = this.nextFrame - now;
+    if (wait > 12) {
+      this.wakeTimer = window.setTimeout(() => {
+        this.timerWake = true;
+        this.raf = requestAnimationFrame(this.frame);
+      }, wait - 8);
+    }
+    else this.raf = requestAnimationFrame(this.frame);
+  }
+
+  private frame = (vsync: number) => {
+    // A rAF requested mid-interval may run straight away with the previous vsync's timestamp,
+    // so after a timer wake-up the timer has already done the gating and the clock is the real time.
+    const woke = this.timerWake;
+    this.timerWake = false;
+    const now = woke ? performance.now() : vsync;
+    // Cap the frame rate: high-refresh displays would otherwise render 120+ frames a second.
+    // While paused the scene is static, so a few frames a second keep it responsive.
+    // An unfocused window is being watched rather than played, so it gets a lower cap too.
+    const cap = this.paused ? 10 : document.hasFocus() ? this.frameCap : Math.min(this.frameCap || 20, 20);
+    if (cap > 0) {
+      // Frame slots keep the average rate exact on any refresh rate (e.g. 60 on a 144 Hz display), not 1/n of it.
+      const interval = 1000 / cap;
+      if (this.nextFrame - now > interval) this.nextFrame = now;
+      if (!woke && now < this.nextFrame - 1) {
+        this.scheduleFrame(now);
+        return;
+      }
+      this.nextFrame = Math.max(this.nextFrame + interval, now - interval / 2);
+    }
+    this.scheduleFrame(now);
     const dt = Math.min(0.1, (now - this.last) / 1000);
     this.last = now;
     if (!this.paused) {
@@ -479,6 +546,8 @@ function showMenu() {
       <div class="form-row">Starting gold <select data-k="startingGold">${opt([10, 20, 50, 100], s.startingGold)}</select></div>
       <div class="form-row">Quick cast <input type="checkbox" data-k="quickCast" ${s.quickCast ? 'checked' : ''}></div>
       <div class="form-row">Lock camera to hero <input type="checkbox" data-k="lockCamera" ${s.lockCamera ? 'checked' : ''}></div>
+      <div class="form-row">Graphics <select data-k="graphics">${opt(Object.keys(GRAPHICS), s.graphics, Object.values(GRAPHICS).map((g) => g.label))}</select></div>
+      <div class="form-row">Anti-aliasing <input type="checkbox" data-k="antialias" ${s.antialias ? 'checked' : ''}></div>
       <div class="form-row" style="justify-content:center;margin-top:18px"><button class="wc-btn big" data-start>Start Game</button></div>
     </div>
     <div class="panel frame assets-panel">
@@ -520,6 +589,8 @@ function showMenu() {
     s.startingGold = Number(get('startingGold').value);
     s.quickCast = get('quickCast').checked;
     s.lockCamera = get('lockCamera').checked;
+    s.graphics = get('graphics').value as GraphicsPreset;
+    s.antialias = get('antialias').checked;
     saveSettings(s);
     sound.ensure();
     sound.setVolume(s.volume);
@@ -554,6 +625,9 @@ async function boot() {
   if (import.meta.env.DEV && new URLSearchParams(location.search).has('autostart')) {
     const p = new URLSearchParams(location.search);
     const s = { ...loadSettings(), bots: Number(p.get('bots') ?? 5), difficulty: 'hard' as Difficulty, rounds: 1, mode: 'round' as const, startingGold: 120, lockCamera: true, volume: 0, arenaShape: (p.get('arena') ?? 'square') as Settings['arenaShape'] };
+    if (p.has('fps')) s.frameCap = Number(p.get('fps'));
+    if (p.has('res')) s.pixelRatio = Number(p.get('res'));
+    if (p.has('aa')) s.antialias = p.get('aa') === '1';
     const game = startGame(s);
     const internals = game as unknown as { pending: Command[]; sim: Sim };
     if (p.get('phase') === 'fight' || p.get('phase') === 'shrink') {

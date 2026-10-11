@@ -120,6 +120,12 @@ interface Transient {
   update?: (t: number, dt: number) => void;
 }
 
+export interface GraphicsOptions {
+  /** Upper bound on the device pixel ratio used for rendering. */
+  pixelRatio: number;
+  antialias: boolean;
+}
+
 export class GameRenderer {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene = new THREE.Scene();
@@ -153,14 +159,14 @@ export class GameRenderer {
   private portraitRenderer: THREE.WebGLRenderer;
   private portraitEl: HTMLElement | null = null;
 
-  constructor(private container: HTMLElement, private sim: Sim, public localId: number) {
-    this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  constructor(private container: HTMLElement, private sim: Sim, public localId: number, gfx: GraphicsOptions = { pixelRatio: 2, antialias: true }) {
+    this.renderer = new THREE.WebGLRenderer({ antialias: gfx.antialias, powerPreference: 'low-power' });
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, gfx.pixelRatio));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(this.renderer.domElement);
     // The portrait sits inside the opaque console, so it gets its own small canvas.
-    this.portraitRenderer = new THREE.WebGLRenderer({ antialias: true });
-    this.portraitRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.portraitRenderer = new THREE.WebGLRenderer({ antialias: gfx.antialias, powerPreference: 'low-power' });
+    this.portraitRenderer.setPixelRatio(Math.min(window.devicePixelRatio, gfx.pixelRatio));
     this.portraitRenderer.outputColorSpace = THREE.SRGBColorSpace;
     this.portraitRenderer.domElement.style.display = 'block';
     this.camera = new THREE.PerspectiveCamera(CAM_FOV, 1, 10, 9000);
@@ -245,6 +251,7 @@ export class GameRenderer {
 
   dispose() {
     window.removeEventListener('resize', this.onResize);
+    this.portraitObserver?.disconnect();
     this.renderer.dispose();
     this.renderer.domElement.remove();
     this.portraitRenderer.dispose();
@@ -254,12 +261,23 @@ export class GameRenderer {
   attachPortrait(el: HTMLElement) {
     this.portraitEl = el;
     el.appendChild(this.portraitRenderer.domElement);
+    this.portraitObserver?.disconnect();
+    this.portraitSize = { w: el.clientWidth, h: el.clientHeight };
+    this.portraitObserver = new ResizeObserver(() => (this.portraitSize = { w: el.clientWidth, h: el.clientHeight }));
+    this.portraitObserver.observe(el);
   }
+
+  // Cached so per-frame screen projections don't force a synchronous layout after HUD writes.
+  private viewRect = { left: 0, top: 0, width: 1, height: 1 };
+  private portraitSize = { w: 0, h: 0 };
+  private portraitObserver?: ResizeObserver;
 
   resize() {
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;
     this.renderer.setSize(w, h);
+    const r = this.renderer.domElement.getBoundingClientRect();
+    this.viewRect = { left: r.left, top: r.top, width: r.width || 1, height: r.height || 1 };
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     const ph = h * this.renderer.getPixelRatio();
@@ -273,7 +291,7 @@ export class GameRenderer {
   }
 
   pick(clientX: number, clientY: number): { x: number; y: number } | null {
-    const r = this.renderer.domElement.getBoundingClientRect();
+    const r = this.viewRect;
     const ndc = new THREE.Vector2(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
     this.raycaster.setFromCamera(ndc, this.camera);
     const hit = new THREE.Vector3();
@@ -283,13 +301,13 @@ export class GameRenderer {
 
   worldToScreen(x: number, y: number, h: number): { x: number; y: number; visible: boolean } {
     const v = sim2three(x, y, h).project(this.camera);
-    const r = this.renderer.domElement.getBoundingClientRect();
+    const r = this.viewRect;
     return { x: ((v.x + 1) / 2) * r.width, y: ((1 - v.y) / 2) * r.height, visible: v.z < 1 };
   }
 
   // Ground-plane corners of the view, for the minimap frustum.
   viewCorners(): { x: number; y: number }[] {
-    const r = this.renderer.domElement.getBoundingClientRect();
+    const r = this.viewRect;
     const out: { x: number; y: number }[] = [];
     for (const [sx, sy] of [[0, 0], [1, 0], [1, 1], [0, 1]]) {
       const p = this.pick(r.left + sx * r.width, r.top + sy * r.height * 0.999);
@@ -475,7 +493,7 @@ export class GameRenderer {
 
   private beamMat(color: number, additive = true, opacity = 1) {
     return new THREE.MeshBasicMaterial({
-      map: this.tex.beam, color, transparent: true, depthWrite: false, opacity, side: THREE.DoubleSide,
+      map: this.tex.beam, color, transparent: true, depthWrite: false, opacity, side: THREE.DoubleSide, forceSinglePass: true,
       blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
     });
   }
@@ -1014,14 +1032,20 @@ export class GameRenderer {
     this.lib.update(dt, this.camera);
 
     this.renderer.render(this.scene, this.camera);
-    this.renderPortrait();
+    this.portraitDt += dt;
+    // The portrait is a small second WebGL canvas; 30 fps is plenty for an idle bust.
+    if (this.portraitDt >= 1 / 30 - 0.002 || dt === 0) {
+      this.renderPortrait(this.portraitDt);
+      this.portraitDt = 0;
+    }
   }
 
-  private renderPortrait() {
+  private portraitDt = 0;
+
+  private renderPortrait(dt: number) {
     const el = this.portraitEl;
     if (!el) return;
-    const w = el.clientWidth;
-    const h = el.clientHeight;
+    const { w, h } = this.portraitSize;
     if (w < 4 || h < 4) return;
     const pr = this.portraitRenderer;
     const cur = pr.getSize(new THREE.Vector2());
@@ -1059,7 +1083,7 @@ export class GameRenderer {
         pm.setSequence(want, want === 'stand');
         this.portraitSeq = want;
       }
-      pm.update(1 / 60, this.portraitCam);
+      pm.update(dt, this.portraitCam);
       pr.render(this.portraitScene, this.portraitCam);
       return;
     }

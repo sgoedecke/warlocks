@@ -18,10 +18,11 @@ export class SoundSystem {
 
   ensure() {
     if (this.ctx) {
-      if (this.ctx.state === 'suspended') this.ctx.resume();
+      this.updateActive();
       return;
     }
     this.ctx = new AudioContext();
+    document.addEventListener('visibilitychange', () => this.updateActive());
     this.master = this.ctx.createGain();
     this.master.gain.value = this.volume;
     const comp = this.ctx.createDynamicsCompressor();
@@ -30,11 +31,22 @@ export class SoundSystem {
     this.noise = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
     const d = this.noise.getChannelData(0);
     for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    this.updateActive();
   }
 
   setVolume(v: number) {
     this.volume = v;
     if (this.ctx) this.master.gain.value = v;
+    this.updateActive();
+  }
+
+  /** Silent or hidden: suspend the audio graph so the looping ambience doesn't keep the audio thread busy. */
+  private updateActive() {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const want = this.volume > 0 && !document.hidden;
+    if (want && ctx.state === 'suspended') void ctx.resume();
+    else if (!want && ctx.state === 'running') void ctx.suspend();
   }
 
   setListener(x: number, y: number) {
@@ -82,7 +94,7 @@ export class SoundSystem {
    * the procedural `fallback` plays instead. Positional when `at` is given.
    */
   playFile(path: string, fallback: Sfx | null, vol = 1, at?: { x: number; y: number }) {
-    if (!this.ctx) return;
+    if (!this.ctx || this.volume <= 0) return;
     const [att, pan] = at ? this.spatial(at.x, at.y) : [1, 0];
     if (!assets.has(path)) {
       if (fallback) this.play(fallback, vol * att, pan);
@@ -106,7 +118,8 @@ export class SoundSystem {
   }
 
   play(name: Sfx, vol = 1, pan = 0) {
-    if (!this.ctx) return;
+    // A suspended context would queue sounds and play them all at once on resume.
+    if (!this.ctx || this.volume <= 0) return;
     const ctx = this.ctx;
     const t = ctx.currentTime;
     const out = ctx.createGain();
