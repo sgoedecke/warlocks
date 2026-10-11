@@ -13,7 +13,7 @@ import { addFiles, assetStatus, initAssets, onAssetStatus, removeArchive, type A
 import { clearMdxCache } from './render/mdx';
 import { BUFFER_TICKS, HASH_EVERY, hashString, type Lockstep } from './net/lockstep';
 import { workerInterval } from './net/timer';
-import { MAX_PLAYERS, NetSession, normalizeCode, type LobbyState, type NetRules, type StartInfo } from './net/session';
+import { MAX_PLAYERS, NetSession, normalizeCode, PUBLIC_ROOMS, type LobbyState, type NetRules, type StartInfo } from './net/session';
 
 /** Dev-only overrides of the graphics preset, for benchmarking. */
 interface GraphicsOverrides {
@@ -706,6 +706,9 @@ function showMenu(notice = '') {
     <div class="side-col">
     <div class="panel frame mp-panel">
       <div class="assets-title">Online</div>
+      <div class="mp-quick"><button class="wc-btn big" data-online>Play Online</button></div>
+      <div class="mp-hint">Joins the public lobby, or opens one if nobody is waiting.</div>
+      <div class="mp-sub">Private game with friends</div>
       <div class="mp-row">
         <button class="wc-btn" data-host>Host Game</button>
         <input data-code placeholder="Code" maxlength="12" spellcheck="false" autocomplete="off">
@@ -782,6 +785,10 @@ function showMenu(notice = '') {
     showLobby(NetSession.host({ name: s.name, color: s.color }, rulesFrom(s), s.difficulty, Math.min(s.bots, MAX_PLAYERS - 1)));
   });
   menu.querySelector('[data-join]')!.addEventListener('click', join);
+  menu.querySelector('[data-online]')!.addEventListener('click', () => {
+    collect();
+    quickPlay(1);
+  });
   menu.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
     if (e.target === codeInput) join();
@@ -801,17 +808,27 @@ function rulesSummary(r: NetRules) {
   ].join(' · ');
 }
 
+/** Play Online: try public room `n`, moving to the next one if its game has started. */
+function quickPlay(n: number) {
+  const s = loadSettings();
+  showLobby(NetSession.public(n, { name: s.name, color: s.color }, rulesFrom(s), s.difficulty));
+}
+
 /** The multiplayer lobby, for host and clients alike. */
 function showLobby(session: NetSession) {
   const el = document.createElement('div');
   el.id = 'menu';
   el.className = 'lobby';
   const invite = `${location.origin}${location.pathname}?join=${session.code}`;
+  // The role can change while this view is up (public rooms); onRole then rebuilds it.
+  const hostView = session.isHost;
   el.innerHTML = `
     <div class="title">WARLOCKS</div>
-    <div class="subtitle">${session.isHost ? 'Hosting an online game' : 'Joining an online game'}</div>
+    <div class="subtitle">${session.isPublic ? 'Public game' : session.isHost ? 'Hosting an online game' : 'Joining an online game'}</div>
     <div class="panel frame lobby-panel">
-      <div class="lobby-code">Room code <b>${session.code}</b> <button class="wc-btn" data-copy>Copy invite link</button></div>
+      ${session.isPublic
+        ? `<div class="lobby-code">Public lobby <b>${session.publicRoom}</b></div>`
+        : `<div class="lobby-code">Room code <b>${session.code}</b> <button class="wc-btn" data-copy>Copy invite link</button></div>`}
       <div class="lobby-status" data-status></div>
       <table class="lobby-players" data-players></table>
       ${session.isHost ? `<div class="form-row">Computer players <span class="stepper"><button class="wc-btn" data-bots="-1">−</button><span data-botcount></span><button class="wc-btn" data-bots="1">+</button></span></div>
@@ -821,26 +838,28 @@ function showLobby(session: NetSession) {
         <button class="wc-btn big" data-leave>Leave</button>
         ${session.isHost ? '<button class="wc-btn big" data-startmp>Start Game</button>' : ''}
       </div>
-      <div class="assets-note">Players connect to each other directly. The room code is all a friend needs: share it or the invite link.</div>
+      <div class="assets-note">${session.isPublic
+        ? 'Anyone who clicks Play Online lands here until the game starts. The host can fill empty seats with computer players.'
+        : 'Players connect to each other directly. The room code is all a friend needs: share it or the invite link.'}</div>
     </div>`;
   app.appendChild(el);
   const q = <T extends HTMLElement>(sel: string) => el.querySelector(sel) as T;
   const render = (l: LobbyState | null) => {
     const status = q<HTMLElement>('[data-status]');
     if (!l) {
-      status.textContent = 'Connecting to the host…';
+      status.textContent = session.isPublic ? 'Looking for an open game…' : 'Connecting to the host…';
       return;
     }
     const humans = l.slots.filter((x) => x.peer).length;
     status.textContent = session.isHost
-      ? (humans > 1 ? `${humans} players connected.` : 'Waiting for players to join…')
+      ? (humans > 1 ? `${humans} players connected.` : session.isPublic ? 'No open game found, so you are hosting. Waiting for players…' : 'Waiting for players to join…')
       : 'Connected. Waiting for the host to start…';
     q<HTMLElement>('[data-players]').innerHTML = l.slots.map((x) => {
       const tags = [x.peer === session.hostId ? 'host' : '', x.peer === session.selfId ? 'you' : '', x.peer ? '' : DIFFICULTY_LABEL[l.difficulty].toLowerCase()].filter(Boolean).join(', ');
       return `<tr><td><span class="swatch" style="background:${PLAYER_COLORS[x.color].css}"></span></td><td>${escapeHtml(x.name)}</td><td class="tags">${tags}</td></tr>`;
     }).join('');
     q<HTMLElement>('[data-rules]').textContent = rulesSummary(l.rules);
-    if (session.isHost) {
+    if (hostView && session.isHost) {
       q<HTMLElement>('[data-botcount]').textContent = String(session.botCount);
       q<HTMLSelectElement>('[data-difficulty]').value = l.difficulty;
       q<HTMLButtonElement>('[data-startmp]').disabled = l.slots.length < 2;
@@ -853,14 +872,19 @@ function showLobby(session: NetSession) {
       close();
       startNetGame(session, info, ls);
     },
-    onClosed: (reason) => {
+    onRole: () => {
       close();
-      showMenu(reason);
+      showLobby(session);
+    },
+    onClosed: (reason, retry) => {
+      close();
+      if (retry && session.isPublic && session.publicRoom < PUBLIC_ROOMS) quickPlay(session.publicRoom + 1);
+      else showMenu(reason);
     },
   };
   render(session.lobby);
   if (import.meta.env.DEV) (window as unknown as { __session: NetSession }).__session = session;
-  q('[data-copy]').addEventListener('click', () => {
+  el.querySelector('[data-copy]')?.addEventListener('click', () => {
     void navigator.clipboard?.writeText(invite).then(() => (q('[data-copy]').textContent = 'Copied!'));
   });
   q('[data-leave]').addEventListener('click', () => {
@@ -929,6 +953,11 @@ async function boot() {
     const s = loadSettings();
     if (import.meta.env.DEV && name) s.name = name;
     showLobby(NetSession.join(joinCode, { name: s.name, color: s.color }));
+  } else if (import.meta.env.DEV && new URLSearchParams(location.search).has('public')) {
+    const s = loadSettings();
+    const name = new URLSearchParams(location.search).get('name');
+    if (name) saveSettings({ ...s, name });
+    quickPlay(Number(new URLSearchParams(location.search).get('public')) || 1);
   } else if (import.meta.env.DEV && new URLSearchParams(location.search).has('host')) {
     const s = loadSettings();
     const p = new URLSearchParams(location.search);

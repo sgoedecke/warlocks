@@ -1,4 +1,4 @@
-import { joinRoom, selfId, type JsonValue, type Room, type TurnServerConfig } from 'trystero/nostr';
+import { joinRoom, selfId, type JsonValue, type Room } from 'trystero/nostr';
 import { BOT_NAMES, PLAYER_COLORS } from '../config';
 import type { Difficulty } from '../ai/bot';
 import type { Command, PlayerSetup, SimRules } from '../sim/types';
@@ -7,9 +7,13 @@ import { workerInterval } from './timer';
 
 const APP_ID = 'warlocks-088b-browser';
 /** Bumped whenever the sim or protocol changes in a way that would desync older builds. */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 export const MAX_PLAYERS = 10;
 const CONNECT_TIMEOUT_MS = 20000;
+/** Public rooms: how long to look for a host before hosting, and how many busy rooms to skip past. */
+const PUBLIC_HOST_WAIT_MS = 6000;
+const PUBLIC_REJECTED_WAIT_MS = 1500;
+export const PUBLIC_ROOMS = 20;
 /** WebRTC can take half a minute to notice a vanished peer, so peers ping and drop silent ones sooner. */
 const SILENCE_TIMEOUT_MS = 10000;
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -22,6 +26,7 @@ export interface StartInfo { seed: number; rules: NetRules; difficulty: Difficul
 
 type Msg =
   | { k: 'hello'; v: number; name: string; color: number }
+  | { k: 'bye' }
   | { k: 'lobby'; s: LobbyState }
   | { k: 'reject'; reason: string }
   | { k: 'start'; info: StartInfo }
@@ -32,22 +37,6 @@ type Msg =
   | { k: 'kick'; reason: string }
   | { k: 'ping' };
 
-/**
- * STUN (Trystero's defaults: Google and Cloudflare) gets most home connections through NAT.
- * Symmetric NATs, CGNAT and strict corporate networks need a TURN relay; there's no reliable
- * keyless public one, so it's opt-in through build-time env vars.
- */
-function turnConfig(): TurnServerConfig[] | undefined {
-  const urls = import.meta.env.VITE_TURN_URL as string | undefined;
-  if (!urls) return undefined;
-  return [{
-    urls: urls.split(',').map((u) => u.trim()).filter(Boolean),
-    username: import.meta.env.VITE_TURN_USERNAME as string | undefined,
-    credential: import.meta.env.VITE_TURN_CREDENTIAL as string | undefined,
-  }];
-}
-export const hasTurn = () => !!turnConfig();
-
 export function makeRoomCode() {
   const bytes = crypto.getRandomValues(new Uint8Array(6));
   return [...bytes].map((b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join('');
@@ -57,23 +46,32 @@ export function normalizeCode(code: string) {
   return code.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
 }
 
-const NO_CONNECTION = 'Could not connect to the host. Check the room code; if it is right, your network '
-  + 'or the host\'s may block direct peer-to-peer connections (strict NAT, mobile hotspot, VPN or office network). '
-  + (hasTurn() ? '' : 'Setting up a TURN relay (see README) fixes this.');
+const NO_CONNECTION = 'Could not connect to the host. Check the room code. If it is right, your network or the host\'s '
+  + 'may block direct peer-to-peer connections (strict NAT, mobile hotspot, VPN or office network).';
 
 export interface SessionEvents {
   onLobby?: (s: LobbyState) => void;
   onStart?: (info: StartInfo, lockstep: Lockstep) => void;
   onChat?: (pid: number, text: string) => void;
-  /** The session is over (host left, kicked, rejected, could not connect). */
-  onClosed?: (reason: string) => void;
+  /** The session is over (host left, kicked, rejected, could not connect). `retry`: try the next public room. */
+  onClosed?: (reason: string, retry: boolean) => void;
+  /** This peer became, or stopped being, the lobby host (public rooms only). */
+  onRole?: () => void;
   /** A player dropped out of a running game. */
   onPlayerLeft?: (pid: number) => void;
 }
 
-/** A multiplayer session: a Trystero room plus the lobby and lockstep protocol on top of it. */
+/**
+ * A multiplayer session: a Trystero room plus the lobby and lockstep protocol on top of it.
+ *
+ * Private rooms have a random code and a fixed host. Public rooms ("Play Online") are numbered and
+ * self-organising: a newcomer joins the open lobby if there is one, moves on to the next room if the
+ * game there has started, and otherwise hosts. If two lobbies form in one room (two people arrived
+ * together), the host with the smaller peer id wins and the other host and its players move over.
+ */
 export class NetSession {
   readonly selfId = selfId;
+  isHost: boolean;
   hostId: string | null;
   lobby: LobbyState | null = null;
   lockstep: Lockstep | null = null;
@@ -85,13 +83,22 @@ export class NetSession {
   private connectTimer = 0;
   private bots = 0;
   private lastError = '';
+  private rejected = '';
+  private helloSent = false;
   private lastHeard = new Map<string, number>();
   private stopBeat: () => void;
   private onPageHide = () => this.close();
 
-  private constructor(readonly code: string, readonly isHost: boolean, private me: { name: string; color: number }) {
+  private constructor(
+    readonly code: string,
+    isHost: boolean,
+    private me: { name: string; color: number },
+    readonly publicRoom: number,
+    private hostSettings: { rules: NetRules; difficulty: Difficulty; bots: number },
+  ) {
+    this.isHost = isHost;
     this.hostId = isHost ? selfId : null;
-    this.room = joinRoom({ appId: APP_ID, password: code, turnConfig: turnConfig() }, code, {
+    this.room = joinRoom({ appId: APP_ID, password: code }, code, {
       // Failures can come from any peer in the room's mesh, not only the host, so only remember them.
       onJoinError: (e) => {
         this.lastError = e.error;
@@ -104,23 +111,25 @@ export class NetSession {
     this.room.onPeerLeave = (peer) => this.onPeerLeave(peer);
     this.stopBeat = workerInterval(1000, () => this.beat());
     window.addEventListener('pagehide', this.onPageHide);
-    if (!isHost) {
-      this.connectTimer = window.setTimeout(() => {
-        if (!this.hostId) this.close(NO_CONNECTION + (this.lastError ? ` (${this.lastError})` : ''));
-      }, CONNECT_TIMEOUT_MS);
-    }
+    if (isHost) this.becomeHost();
+    else this.waitForHost(this.isPublic ? PUBLIC_HOST_WAIT_MS : CONNECT_TIMEOUT_MS);
   }
 
   static host(me: { name: string; color: number }, rules: NetRules, difficulty: Difficulty, bots: number) {
-    const s = new NetSession(makeRoomCode(), true, me);
-    s.bots = bots;
-    s.lobby = { slots: [], rules, difficulty };
-    s.rebuildLobby([{ peer: selfId, name: me.name, color: me.color }]);
-    return s;
+    return new NetSession(makeRoomCode(), true, me, 0, { rules, difficulty, bots });
   }
 
   static join(code: string, me: { name: string; color: number }) {
-    return new NetSession(normalizeCode(code), false, me);
+    return new NetSession(normalizeCode(code), false, me, 0, { rules: {} as NetRules, difficulty: 'normal', bots: 0 });
+  }
+
+  /** Public room `n` (1-based). If nobody is hosting there, this peer hosts with these settings and no bots. */
+  static public(n: number, me: { name: string; color: number }, rules: NetRules, difficulty: Difficulty) {
+    return new NetSession(`PUBLIC${n}`, false, me, n, { rules, difficulty, bots: 0 });
+  }
+
+  get isPublic() {
+    return this.publicRoom > 0;
   }
 
   get inGame() {
@@ -128,14 +137,14 @@ export class NetSession {
   }
 
   /** Close the session and leave the room. */
-  close(reason = '') {
+  close(reason = '', retry = false) {
     if (this.closed) return;
     this.closed = true;
     clearTimeout(this.connectTimer);
     this.stopBeat();
     window.removeEventListener('pagehide', this.onPageHide);
     void this.room.leave();
-    this.events.onClosed?.(reason);
+    this.events.onClosed?.(reason, retry);
   }
 
   // ---------- host lobby controls ----------
@@ -201,6 +210,56 @@ export class NetSession {
     }
   }
 
+  // ---------- roles ----------
+
+  private waitForHost(ms: number) {
+    clearTimeout(this.connectTimer);
+    this.connectTimer = window.setTimeout(() => this.hostWaitOver(), ms);
+  }
+
+  private hostWaitOver() {
+    if (this.closed || this.hostId) return;
+    if (!this.isPublic) this.close(this.rejected || NO_CONNECTION + (this.lastError ? ` (${this.lastError})` : ''));
+    else if (this.rejected) this.close(this.rejected, true);
+    else {
+      this.becomeHost();
+      this.events.onRole?.();
+    }
+  }
+
+  private becomeHost() {
+    this.isHost = true;
+    this.hostId = selfId;
+    this.bots = this.hostSettings.bots;
+    this.lobby = { slots: [], rules: this.hostSettings.rules, difficulty: this.hostSettings.difficulty };
+    this.rebuildLobby([{ peer: selfId, name: this.me.name, color: this.me.color }]);
+  }
+
+  /** Follow `peer` as host: on first contact, or when a lobby with a better claim to the room turns up. */
+  private followHost(peer: string) {
+    if (this.hostId && this.hostId !== peer) this.send({ k: 'bye' }, this.hostId);
+    const wasHost = this.isHost;
+    this.isHost = false;
+    this.hostId = peer;
+    this.helloSent = false;
+    this.lobby = null;
+    clearTimeout(this.connectTimer);
+    if (wasHost) this.events.onRole?.();
+  }
+
+  /** The lobby host went away. In a public room, look for (or become) the next one. */
+  private hostLost(reason: string) {
+    if (!this.isPublic || this.inGame) {
+      this.close(reason);
+      return;
+    }
+    this.hostId = null;
+    this.lobby = null;
+    this.rejected = '';
+    this.events.onRole?.();
+    this.waitForHost(1000 + Math.random() * 1000);
+  }
+
   // ---------- internals ----------
 
   private pidOf(peer: string) {
@@ -264,7 +323,7 @@ export class NetSession {
     if (!this.isHost) {
       if (!this.hostId) return;
       this.send({ k: 'ping' }, this.hostId);
-      if (now - (this.lastHeard.get(this.hostId) ?? now) > SILENCE_TIMEOUT_MS) this.close('Lost the connection to the host.');
+      if (now - (this.lastHeard.get(this.hostId) ?? now) > SILENCE_TIMEOUT_MS) this.hostLost('Lost the connection to the host.');
       return;
     }
     // Turns already flow to clients during a game.
@@ -280,13 +339,16 @@ export class NetSession {
 
   private onPeerJoin(peer: string) {
     this.lastHeard.set(peer, performance.now());
-    if (!this.isHost) this.send({ k: 'hello', v: PROTOCOL_VERSION, name: this.me.name, color: this.me.color }, peer);
+    // Hosts introduce themselves; clients answer the lobby with a hello.
+    if (!this.isHost) return;
+    if (this.inGame) this.send({ k: 'reject', reason: 'That game has already started.' }, peer);
+    else if (this.lobby) this.send({ k: 'lobby', s: this.lobby }, peer);
   }
 
   private onPeerLeave(peer: string) {
     if (this.closed) return;
     if (!this.isHost) {
-      if (peer === this.hostId) this.close('The host has left the game.');
+      if (peer === this.hostId) this.hostLost('The host has left the game.');
       return;
     }
     if (this.inGame) {
@@ -300,6 +362,8 @@ export class NetSession {
   private onMessage(m: Msg, from: string) {
     if (this.closed || !m || typeof m !== 'object') return;
     this.lastHeard.set(from, performance.now());
+    // Two lobbies in one room: everyone in a lobby follows the host with the smallest peer id.
+    if (m.k === 'lobby' && !this.inGame && from !== this.hostId && (!this.hostId || from < this.hostId)) this.followHost(from);
     if (this.isHost) this.onHostMessage(m, from);
     else this.onClientMessage(m, from);
   }
@@ -316,6 +380,9 @@ export class NetSession {
         this.rebuildLobby([...humans, { peer: from, name, color: Number(m.color) | 0 }]);
         return;
       }
+      case 'bye':
+        if (!this.inGame) this.onPeerLeave(from);
+        return;
       case 'cmd': {
         const pid = this.pidOf(from);
         const c = pid >= 0 ? sanitizeCommand(m.c, pid) : null;
@@ -342,26 +409,32 @@ export class NetSession {
   }
 
   private onClientMessage(m: Msg, from: string) {
-    // Only the host speaks with authority; the first peer to send a lobby is the host.
-    if (m.k === 'lobby' && !this.hostId) {
-      this.hostId = from;
-      clearTimeout(this.connectTimer);
+    if (m.k === 'reject' && !this.hostId) {
+      // Before we have a host, a refusal comes from a game in progress (or a full or newer one).
+      // Public rooms wait briefly in case an open lobby also answers, then move on.
+      this.rejected = String(m.reason ?? 'Could not join that game.');
+      if (!this.isPublic) this.close(this.rejected);
+      else this.waitForHost(PUBLIC_REJECTED_WAIT_MS);
+      return;
     }
+    // Only the host speaks with authority.
     if (from !== this.hostId) return;
     switch (m.k) {
       case 'lobby':
         this.lobby = m.s;
         if (!this.inGame) this.events.onLobby?.(m.s);
+        if (!this.helloSent && !m.s.slots.some((s) => s.peer === selfId)) {
+          this.helloSent = true;
+          this.send({ k: 'hello', v: PROTOCOL_VERSION, name: this.me.name, color: this.me.color }, from);
+        }
         return;
       case 'reject':
-        this.close(m.reason);
-        return;
       case 'kick':
-        this.close(m.reason);
+        this.close(m.reason, this.isPublic && !this.inGame);
         return;
       case 'start':
         if (m.info.peers.includes(selfId)) this.begin(m.info);
-        else if (!this.inGame) this.close('The game started before you joined.');
+        else if (!this.inGame) this.close('The game started before you joined.', this.isPublic);
         return;
       case 'turn':
         this.lockstep?.receiveTurn(m.n, m.c);

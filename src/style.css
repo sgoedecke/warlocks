@@ -877,6 +877,20 @@ body {
   flex: 1;
 }
 
+.mp-quick {
+  display: flex;
+  justify-content: center;
+  margin-top: 10px;
+}
+
+.mp-sub {
+  color: var(--gold);
+  font-size: 14px;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid #4a3a1a;
+}
+
 .mp-hint {
   color: #888;
   font-size: 12.5px;

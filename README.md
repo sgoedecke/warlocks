@@ -63,27 +63,20 @@ The map's models borrow all of their textures from the base game. `src/render/op
 
 ## Online multiplayer
 
-Click **Host Game** on the main menu to open a lobby using the settings on the left. The lobby shows a room code and a **Copy invite link** button (`?join=CODE`). Friends enter the code under **Join** or open the link. The host can add or remove computer players and set their difficulty, then starts the game. Up to 10 players can take part, humans and computers combined.
+**Play Online** on the main menu joins the public lobby. If nobody is waiting there, you become its host, using the settings on the left. Whoever hosts can fill empty seats with computer players and start the game when ready. Once a game starts, newcomers go to the next public lobby, so a new one is always open.
+
+For a private game, click **Host Game**. The lobby shows a room code and a **Copy invite link** button (`?join=CODE`). Friends enter the code under **Join** or open the link. Up to 10 players can take part, humans and computers combined.
 
 How it works:
 
-- **Signalling.** [Trystero](https://github.com/dmotz/trystero) finds peers through public Nostr relays, so no game server is needed. The room code is also the password that encrypts the WebRTC handshake on those relays. After that, game traffic goes directly between browsers over WebRTC data channels.
+- **Signalling.** [Trystero](https://github.com/dmotz/trystero) finds peers through public Nostr relays, so no game server is needed. The room code also encrypts the WebRTC handshake on those relays. After that, game traffic goes directly between browsers over WebRTC data channels.
+- **Public lobbies** are numbered rooms (`PUBLIC1`, `PUBLIC2`, …). A newcomer joins the open lobby in the first room that has one. A room whose game has started refuses newcomers, who move to the next room. If nobody answers within 6 s, the newcomer hosts. If two people arrive together and both start hosting, the host with the smaller peer id keeps the room and the other lobby merges into it. If a lobby's host leaves before the game starts, the remaining players pick a new host the same way.
 - **Lockstep, as WC3 does it.** Only orders are sent, never game state. Clients send their orders to the host. Every 2 ticks (60 ms) the host bundles everything it has received into a turn, broadcasts it, and plays it. Clients play a turn once it arrives and keep about 3 ticks queued to absorb jitter, gently speeding up or slowing down to hold that buffer. The host never waits for anyone.
 - **Bots run on every peer.** They are deterministic, so their orders don't cross the network.
 - **Determinism.** The sim uses its own `sin`, `cos`, `atan2` and `hypot` (`src/sim/dmath.ts`). JS engines may round `Math.sin` and similar functions differently. Every ~2 s, each client sends the host a hash of its state. A client that falls out of sync is dropped.
-- **Leavers.** As in the original map, a player who leaves has their warlock removed and is greyed out on the multiboard. A closed tab is noticed at once; a dead connection after 10 s. If the host leaves, the game ends.
+- **Leavers.** As in the original map, a player who leaves has their warlock removed and is greyed out on the multiboard. A closed tab is noticed at once; a dead connection after 10 s. If the host leaves mid-game, the game ends.
 - **Background tabs.** Online, the sim keeps ticking from a worker timer when the tab is hidden, so a backgrounded host doesn't freeze the game. The game menu doesn't pause.
-
-### NAT traversal and TURN
-
-The game uses public STUN servers (Google and Cloudflare) to open direct connections. That works for most home networks. It fails when either player is behind a symmetric NAT or carrier-grade NAT (common on mobile hotspots), or on a strict office, university or VPN network. Those players need a TURN relay, and there is no reliable public TURN server that doesn't need an account. To add one, set these when building:
-
-```sh
-VITE_TURN_URL=turn:turn.example.com:3478,turns:turn.example.com:443 \
-VITE_TURN_USERNAME=user VITE_TURN_CREDENTIAL=secret npm run build
-```
-
-Free options include [Metered Open Relay](https://www.metered.ca/tools/openrelay/), which needs a free account, and self-hosted [coturn](https://github.com/coturn/coturn). Credentials set this way end up in the built JavaScript, so use a limited or time-boxed account.
+- **NAT traversal.** Connections are direct, opened with public STUN servers (Google and Cloudflare); there is no relay. That works for most home networks. It fails if a player is behind a symmetric or carrier-grade NAT (common on mobile hotspots), or on a strict office, university or VPN network.
 
 ## Graphics and power use
 
