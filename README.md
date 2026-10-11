@@ -20,7 +20,7 @@ Every push to `master` builds the site and deploys it to GitHub Pages (`.github/
 - Physics uses 0.03s ticks, per-tick inertial velocities, controlled walking, friction/ice/freeze damping, arena bounds bounce, warlock/obstacle/projectile collision, and original-style knockback:
   `(100 + damagePoints) * damage * 0.03 * DC * spellFactor`.
 - Arena is painted onto the original 0.88b `war3map.w3e` footprint: a flat 64×64 tile / 65×65 vertex grid from `-4096..4096`, initially lava everywhere. The script then applies the 0.88b safe/lava tile pairs, random theme probabilities, optional ice patches, terrain versioning, shrink by `CR * sqrt(living)`, and obstacle sets 1–6 carrying their original model paths.
-- Round and deathmatch modes, shop phase, spawn positions, kill/assist/win/most-damage rewards, starting/gold-per-round economy and the final scoreboard are implemented.
+- Round and deathmatch modes (deathmatch by default), shop phase, spawn positions, kill/assist/win/most-damage rewards, starting/gold-per-round economy and the final scoreboard are implemented.
 - The shop copies the original's shop units: the Merchant (masteries, inventory) links to Spells 1, Spells 2 and Items, each a 4×3 command card with the original button positions. Costs, max levels, one-spell-per-hotkey locking, item upgrade chains and the Fire Spray / Splitter mode toggles follow 0.88b.
 - Kill announcements follow the original priority (First Blood, then multikills within 9s, then sprees from 3 to 10 kills), each with its announcer line.
 - All normally obtainable spells are represented: Fireball, Scourge, Lightning, Homing, Boomerang, Meteor, Splitter, Wind Walk, Teleport, Thrust, Displacement, Drain, Fire Spray, Bouncer, Shield, Time Shift, Rush, Freeze, Gravity, and Link.
@@ -33,7 +33,7 @@ Everything is drawn in code or comes from openly licensed models, icons and font
 - **Obstacles**: columns, rock pillars and trees from Kenney's [Nature Kit](https://kenney.nl/assets/nature-kit) (CC0). They are recoloured for each tileset and given procedural painted detail textures with box-projected UVs (`src/render/obstacleModels.ts`).
 - **Terrain**: procedural tile textures (`src/render/tileTextures.ts`) drawn with a port of WC3's ground tile shader (`src/render/terrain.ts`), which picks atlas cells from the tile types at each tile's four corners. That's why the lava edge steps tile by tile like the original. To hide repetition, the shader blends two rotated placements of each texture under a slow mask and adds broad light and dark patches. The minimap samples the same textures.
 - **Effects**: point-sprite particles, with fire and smoke using procedural 8×8 cloud flipbooks (`src/render/clouds.ts`).
-- **Command button icons**: glyphs from [game-icons.net](https://game-icons.net) by Lorc, Delapouite and Lucas ([CC BY 3.0](https://creativecommons.org/licenses/by/3.0/)), lit and framed in code (`src/render/icons.ts`). `node scripts/build-icons.mjs` regenerates `src/render/gameIconPaths.ts` from the glyph names in `icons.ts`.
+- **Command button icons**: glyphs from [game-icons.net](https://game-icons.net) by Lorc, Delapouite and Lucas ([CC BY 3.0](https://creativecommons.org/licenses/by/3.0/)), lit and framed in code (`src/render/icons.ts`). `node scripts/build-icons.mjs` regenerates `src/render/gameIconPaths.ts` from the glyph names in `icons.ts`. The favicon (`public/favicon.png`) is the Fireball icon.
 - **Font**: [Marcellus](https://fonts.google.com/specimen/Marcellus) by Astigmatic ([SIL OFL](https://openfontlicense.org)), via `@fontsource/marcellus`, with digits from [Cinzel](https://fonts.google.com/specimen/Cinzel) by Natanael Gama (SIL OFL).
 - **Sound**: synthesised with WebAudio (`src/audio.ts`).
 
@@ -46,6 +46,7 @@ Everything is drawn in code or comes from openly licensed models, icons and font
 | Hotkey, then left-click | Cast targeted spell |
 | `Q E R T Y F G C` | Command-card spell hotkeys (the original's `D` slot is on `Q`, leaving WASD free) for the currently learned spell in each slot |
 | `X` | Stop |
+| `B` | Shop (deathmatch) |
 | Arrow keys / screen edge | Pan camera while dead (otherwise it stays on your warlock) |
 | Mouse wheel | Zoom |
 | `Tab` | Multiboard |
@@ -54,21 +55,22 @@ Everything is drawn in code or comes from openly licensed models, icons and font
 
 ## Online multiplayer
 
-**Quick Play** on the main menu joins the public lobby. If nobody is waiting there, you become its host. Whoever hosts can add computer players and start the game when ready. Once a game starts, newcomers go to the next public lobby, so a new one is always open.
+**Quick Play** on the main menu drops you into the public game. If nobody is playing, you start one straight away against three computer players, and whoever comes next joins it mid-fight.
 
-**Host Game** opens a private lobby with a room code and a **Copy link** button (`?join=CODE`). Friends enter the code under **Join** or open the link. Up to 10 players can take part, humans and computers combined. A host who starts with only computer players plays offline, so the game can pause.
+**Host Game** opens a private lobby with a room code and a **Copy link** button (`?join=CODE`). Friends enter the code under **Join** or open the link, before or after the host starts. Up to 10 players can take part, humans and computers combined. Hosted games stay online even with only computer players, so friends can still join; a host alone can pause.
 
-Games are always 10 rounds, free for all, on the square arena with 10 starting gold and Normal computer players. The sim still supports the map's other modes (deathmatch, teams, circular arena), but the menu doesn't offer them.
+Games are deathmatch (the original's `-dm`), free for all, on the square arena: dead warlocks respawn after 10 s, a kill or assist is worth a point and a death costs one, and the first to 20 points wins. Everyone starts with 10 gold and gets 10 more with each terrain refresh (every 3 minutes). The shop opens with `B` or the **Shop** button, and by itself while you wait to respawn. The sim still supports the map's other modes (rounds, teams, circular arena), but the menu doesn't offer them.
 
 How it works:
 
 - **Signalling.** [Trystero](https://github.com/dmotz/trystero) finds peers through public Nostr relays, so no game server is needed. The room code also encrypts the WebRTC handshake on those relays. After that, game traffic goes directly between browsers over WebRTC data channels.
-- **Public lobbies** are numbered rooms (`PUBLIC1`, `PUBLIC2`, …). A newcomer joins the open lobby in the first room that has one. A room whose game has started refuses newcomers, who move to the next room. If nobody answers within 3 s, the newcomer hosts, and the lobby starts with three computer players. If two people arrive together and both start hosting, the host with the smaller peer id keeps the room and the other lobby merges into it. If a lobby's host leaves before the game starts, the remaining players pick a new host the same way.
+- **Public games** are numbered rooms (`PUBLIC1`, `PUBLIC2`, …). A newcomer joins the game in the first room that has one, moving on only if it is full. If nobody answers within 3 s, the newcomer hosts and starts a game with three computer players. If two hosts end up in one room, newcomers prefer the one already playing, and otherwise the one with the smaller peer id.
+- **Joining mid-game.** The host adds the newcomer with a `join` order in the next turn, so every peer adds them on the same tick. Once there are four or more warlocks, a computer player leaves to make room. Right after that turn the host sends the newcomer the whole game state: the sim and the bots, serialised so that `-0`, `NaN` and `Infinity` survive. The newcomer starts from that tick and plays the turns that follow. Turns that arrive before the state are kept until it does. Newcomers get the gold and lava scaling everyone else has earned from terrain refreshes.
 - **Lockstep, as WC3 does it.** Only orders are sent, never game state. Clients send their orders to the host. Every 2 ticks (60 ms) the host bundles everything it has received into a turn, broadcasts it, and plays it. Clients play a turn once it arrives and keep about 3 ticks queued to absorb jitter, gently speeding up or slowing down to hold that buffer. The host never waits for anyone.
 - **Bots run on every peer.** They are deterministic, so their orders don't cross the network.
 - **Determinism.** The sim uses its own `sin`, `cos`, `atan2` and `hypot` (`src/sim/dmath.ts`). JS engines may round `Math.sin` and similar functions differently. Every ~2 s, each client sends the host a hash of its state. A client that falls out of sync is dropped.
 - **Leavers.** As in the original map, a player who leaves has their warlock removed and is greyed out on the multiboard. A closed tab is noticed at once; a dead connection after 10 s. If the host leaves mid-game, the game ends.
-- **Background tabs.** Online, the sim keeps ticking from a worker timer when the tab is hidden, so a backgrounded host doesn't freeze the game. The game menu doesn't pause.
+- **Background tabs.** Online, the sim keeps ticking from a worker timer when the tab is hidden, so a backgrounded host doesn't freeze the game. The game menu doesn't pause. A host with nobody else in the game is the exception to both: their game pauses, as an offline one would.
 - **NAT traversal.** Connections are direct, opened with public STUN servers (Google and Cloudflare); there is no relay. That works for most home networks. It fails if a player is behind a symmetric or carrier-grade NAT (common on mobile hotspots), or on a strict office, university or VPN network.
 
 ## Graphics and power use

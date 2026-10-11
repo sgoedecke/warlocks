@@ -95,11 +95,50 @@ function spellDrill() {
   assert(cast.size === ALL_SPELLS.length, 'not all spells were cast');
 }
 
+/**
+ * Late join: a peer restored from a mid-game snapshot must stay in lockstep with the original,
+ * through a join, deaths, respawns, shopping and terrain refreshes.
+ */
+function lateJoin() {
+  const rules = { mode: 'deathmatch' as const, rounds: 1, startingGold: 10, teams: 'ffa' as const, arenaShape: 'square' as const, pointLimit: 1000 };
+  const sim = new Sim({ players: players(4), seed: 777, rules });
+  let bots = sim.players.map((p) => new Bot(p.id, 777 ^ (p.id * 7919), 'normal'));
+  const run = (s: Sim, bs: Bot[], extra: Command[] = []) => {
+    let cmds = extra;
+    for (const b of bs) cmds = cmds.concat(b.think(s));
+    s.step(cmds);
+  };
+  for (let i = 0; i < 6100; i++) run(sim, bots);
+  assert(sim.refreshes === 1, `expected one terrain refresh, got ${sim.refreshes}`);
+  assert(sim.players.some((p) => Object.keys(p.spells).length > 2), 'deathmatch bots never shopped');
+  const state = sim.snapshot();
+  const copy = Sim.restore(state);
+  let copyBots = bots.map((b) => Bot.restore(JSON.parse(JSON.stringify(b.snapshot()))));
+  assert(copy.stateHash() === sim.stateHash(), 'restored sim differs');
+  const join: Command = { pid: 4, type: 'join', name: 'Late', color: 4 };
+  run(sim, bots, [join]);
+  run(copy, copyBots, [join]);
+  assert(sim.players.length === 5 && copy.players.length === 5, 'join did not add a player');
+  const late = sim.players[4];
+  assert(late.alive && late.gold === 20 && late.contributions.length === 5, 'late joiner not set up');
+  bots = bots.concat(new Bot(4, 1, 'normal'));
+  copyBots = copyBots.concat(new Bot(4, 1, 'normal'));
+  let deaths = 0;
+  for (let i = 0; i < 4000; i++) {
+    run(sim, bots);
+    run(copy, copyBots);
+    deaths += sim.events.filter((e) => e.t === 'death').length;
+    if (i % 50 === 0) assert(copy.snapshot() === sim.snapshot(), `restored game diverged at tick ${sim.tick}`);
+  }
+  assert(deaths > 0, 'no deaths after the join');
+}
+
 function main() {
   const a = runBotGame(123456);
   const b = runBotGame(123456);
   assert(a === b, 'same-seed bot games diverged');
   spellDrill();
+  lateJoin();
   console.log('simtest ok');
   console.log(`deterministic hash ${a.slice(0, 160)}...`);
 }

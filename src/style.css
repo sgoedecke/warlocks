@@ -511,6 +511,20 @@ body {
   z-index: 20;
 }
 
+/* Deathmatch: the shop opens mid-fight, so it sits to the side of your warlock. */
+.shop.dm {
+  left: auto;
+  right: 12px;
+  top: calc(50% - var(--console-h) / 2 + var(--topbar-h) / 2);
+  transform: translateY(-50%);
+}
+
+.shop:not(.dm) [data-act="closeShop"],
+.shop.dm [data-act="ready"],
+.shop.dm [data-el="shopTimer"] {
+  display: none;
+}
+
 .shop h2,
 .modal h2 {
   margin: 0 0 4px;

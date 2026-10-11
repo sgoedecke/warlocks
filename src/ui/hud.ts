@@ -123,6 +123,7 @@ export class Hud {
         <div class="top-left">
           <button class="wc-btn" data-act="menu">Menu</button>
           <button class="wc-btn" data-act="scores">Scores</button>
+          <button class="wc-btn" data-act="shop">Shop (B)</button>
         </div>
         <div class="top-center frame"><div class="clock">0:00</div><div class="round">Round 1</div></div>
         <div class="resources frame">
@@ -148,6 +149,7 @@ export class Hud {
           <div class="gold"><img src="${this.gold}"><span data-el="shopGold">0</span> gold</div>
           <div data-el="shopTimer">Next round in 20</div>
           <button class="wc-btn big" data-act="ready">Ready</button>
+          <button class="wc-btn big" data-act="closeShop">Close</button>
         </div>
       </div>
       <div class="modal frame pause hidden">
@@ -180,6 +182,9 @@ export class Hud {
     this.els.hpText = q('.hp-text');
     this.els.buffs = q('.spellbar .buffs');
     this.els.shop = q('.shop');
+    this.els.shop.classList.toggle('dm', this.deathmatch);
+    q('[data-act="shop"]').classList.toggle('hidden', !this.deathmatch);
+    this.shopShown = this.deathmatch;
     this.els.pause = q('.pause');
     this.els.gameover = q('.gameover');
     this.minimap = q<HTMLCanvasElement>('.minimap-frame canvas');
@@ -190,6 +195,7 @@ export class Hud {
       if (act === 'menu') cb.onPause();
       else if (act === 'scores') this.toggleScores();
       else if (act === 'ready') cb.onReady();
+      else if (act === 'shop' || act === 'closeShop') this.toggleShop();
       else if (act === 'resume') cb.onResume();
       else if (act === 'quit') cb.onQuit();
       else if (act === 'again') cb.onPlayAgain();
@@ -206,6 +212,25 @@ export class Hud {
 
   toggleScores() {
     this.els.mb.classList.toggle('collapsed');
+  }
+
+  /** Deathmatch has no shop phase: the shop opens on demand, and while you wait to respawn. */
+  private get deathmatch() {
+    return this.sim.rules.mode === 'deathmatch';
+  }
+
+  private shopShown = false;
+  private shopAuto = false;
+  private wasDead = false;
+
+  get shopOpen() {
+    return this.sim.phase === 'shop' || (this.deathmatch && this.shopShown && this.sim.phase !== 'gameOver');
+  }
+
+  toggleShop() {
+    if (!this.deathmatch) return;
+    this.shopShown = !this.shopShown;
+    this.shopAuto = false;
   }
 
   private onResize = () => this.resize();
@@ -366,6 +391,9 @@ export class Hud {
       case 'left':
         this.message(`${playerName(P(e.pid))} has left the game.`, 8);
         break;
+      case 'joined':
+        this.message(`${playerName(P(e.pid))} has joined the game.`, 8);
+        break;
       case 'announcement':
         this.center(e.text, 1.8);
         this.message(`<span style="color:#ffcc00">${esc(e.text)}</span>`, 6);
@@ -408,8 +436,9 @@ export class Hud {
     const local = winner.id === this.localId;
     (this.els.gameover.querySelector('h2') as HTMLElement).textContent = local ? 'Victory!' : 'Defeat';
     this.els.winner.innerHTML = `${playerName(winner)} is the greatest warlock!`;
-    this.els.final.innerHTML = `<tr><th>Player</th><th>Wins</th><th>Kills</th><th>Deaths</th><th>Damage</th></tr>` +
-      ranking.map((p) => `<tr><td>${playerName(p)}</td><td>${p.stats.wins}</td><td>${p.stats.kills}</td><td>${p.stats.deaths}</td><td>${Math.round(p.stats.damage)}</td></tr>`).join('');
+    const dm = this.deathmatch;
+    this.els.final.innerHTML = `<tr><th>Player</th><th>${dm ? 'Points' : 'Wins'}</th><th>Kills</th><th>Deaths</th><th>Damage</th></tr>` +
+      ranking.map((p) => `<tr><td>${playerName(p)}</td><td>${dm ? p.stats.points : p.stats.wins}</td><td>${p.stats.kills}</td><td>${p.stats.deaths}</td><td>${Math.round(p.stats.damage)}</td></tr>`).join('');
     this.els.gameover.classList.remove('hidden');
   }
 
@@ -425,12 +454,12 @@ export class Hud {
     const me = sim.players[this.localId];
     setText(this.els.gold, String(me.gold));
     const alive = sim.players.filter((p) => p.alive).length;
-    setText(this.els.alive, `Alive ${alive}/${sim.players.length}`);
+    setText(this.els.alive, `Alive ${alive}/${sim.players.filter((p) => !p.left).length}`);
 
     const t = Math.floor(sim.roundTime);
     if (sim.phase === 'shop') setText(this.els.clock, `Shop ${Math.ceil(Math.max(0, sim.phaseTimer))}`);
     else setText(this.els.clock, `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`);
-    setText(this.els.round, `Round ${sim.round} / ${sim.totalRounds}`);
+    setText(this.els.round, this.deathmatch ? `First to ${sim.rules.pointLimit}` : `Round ${sim.round} / ${sim.totalRounds}`);
 
     if (sim.phase === 'countdown') {
       const n = Math.ceil(sim.phaseTimer);
@@ -456,7 +485,7 @@ export class Hud {
     if (me.windwalk > 0) buffs.push(`<img title="Windwalk" src="${spellIcon('windwalk', 48)}">`);
     if (me.link) buffs.push(`<img title="Link" src="${spellIcon('link', 48)}">`);
     if (me.inLava && me.alive) buffs.push(`<span style="color:#ff6020">Burning!</span>`);
-    if (!me.alive) buffs.push(`<span style="color:#aaa">Dead: waiting for next round</span>`);
+    if (!me.alive && !me.left) buffs.push(`<span style="color:#aaa">${this.deathmatch ? `Respawning in ${Math.ceil(me.respawn)}` : 'Dead: waiting for next round'}</span>`);
     const bh = buffs.join('');
     setHtml(this.els.buffs, bh);
 
@@ -492,7 +521,14 @@ export class Hud {
     }
 
     // Shop
-    const shopOpen = sim.phase === 'shop';
+    if (this.deathmatch) {
+      if (!me.alive && !this.wasDead) {
+        this.shopShown = true;
+        this.shopAuto = true;
+      } else if (me.alive && this.wasDead && this.shopAuto) this.shopShown = false;
+      this.wasDead = !me.alive;
+    }
+    const shopOpen = this.shopOpen;
     this.els.shop.classList.toggle('hidden', !shopOpen);
     if (shopOpen) {
       setText(this.els.shopGold, String(me.gold));
@@ -609,13 +645,14 @@ export class Hud {
   }
 
   private updateMultiboard() {
+    const dm = this.deathmatch;
     const rows = this.sim.ranking().map((p) => {
       const cls = p.left ? 'left' : this.sim.phase !== 'shop' && !p.alive ? 'dead' : '';
-      return `<tr class="${cls}"><td>${playerName(p)}${p.id === this.localId ? ' *' : ''}</td><td>${p.stats.wins}</td><td>${p.stats.kills}</td><td>${p.stats.deaths}</td></tr>`;
+      return `<tr class="${cls}"><td>${playerName(p)}${p.id === this.localId ? ' *' : ''}</td><td>${dm ? p.stats.points : p.stats.wins}</td><td>${p.stats.kills}</td><td>${p.stats.deaths}</td></tr>`;
     });
-    const html = `<tr><th>Player</th><th>W</th><th>K</th><th>D</th></tr>${rows.join('')}`;
+    const html = `<tr><th>Player</th><th>${dm ? 'Pts' : 'W'}</th><th>K</th><th>D</th></tr>${rows.join('')}`;
     setHtml(this.els.mbTable, html);
-    setText(this.els.mb.querySelector('.mb-title') as HTMLElement, `Warlocks — Round ${this.sim.round}/${this.sim.totalRounds}`);
+    setText(this.els.mb.querySelector('.mb-title') as HTMLElement, dm ? `Warlocks — First to ${this.sim.rules.pointLimit}` : `Warlocks — Round ${this.sim.round}/${this.sim.totalRounds}`);
   }
 
   private drawOverlay(dt: number) {

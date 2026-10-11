@@ -66,7 +66,10 @@ export class Lockstep {
   private earlyHashes: { pid: number; tick: number; hash: number }[] = [];
   onDesync: ((pid: number) => void) | null = null;
 
-  constructor(readonly isHost: boolean, readonly localId: number, private transport: LockstepTransport) {}
+  /** `startTick`: the sim tick this peer starts on, which is later than 0 when joining a game in progress. */
+  constructor(readonly isHost: boolean, readonly localId: number, private transport: LockstepTransport, startTick = 0) {
+    this.lastTurn = Math.ceil(startTick / TURN_TICKS) - 1;
+  }
 
   /** Queue an order from the local player. */
   submit(cmd: Command) {

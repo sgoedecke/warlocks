@@ -826,6 +826,9 @@ export class GameRenderer {
         if (e.kind === 'gravity') this.flash(e.x, e.y, 50, 0x8030ff, 260, 0.4);
         break;
       }
+      case 'joined':
+        this.createUnit(this.sim.players[e.pid]);
+        break;
       case 'hit': {
         const v = this.units.get(e.pid);
         if (v) v.flash = 1;

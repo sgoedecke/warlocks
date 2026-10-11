@@ -4,8 +4,9 @@ import './style.css';
 import {
   ALL_SPELLS, DT, PLAYER_COLORS, shuffledBotNames, SPELLS, WARLOCK_CARD, WARLOCK_RADIUS, type SpellId,
 } from './config';
-import { Bot, type Difficulty } from './ai/bot';
+import { Bot, type BotState, type Difficulty } from './ai/bot';
 import { Sim } from './sim/game';
+import { decodeState, encodeState } from './sim/snapshot';
 import type { Command, GameEvent, PlayerSetup, SimRules } from './sim/types';
 import { GameRenderer } from './render/renderer';
 import { loadUnitModels } from './render/unitModel';
@@ -13,9 +14,9 @@ import { loadObstacleModels } from './render/obstacleModels';
 import { makeCursor } from './render/textures';
 import { Hud, playerName } from './ui/hud';
 import { SoundSystem, type Sfx } from './audio';
-import { BUFFER_TICKS, HASH_EVERY, hashString, type Lockstep } from './net/lockstep';
+import { BUFFER_TICKS, HASH_EVERY, hashString, TURN_TICKS, type Lockstep } from './net/lockstep';
 import { workerInterval } from './net/timer';
-import { MAX_PLAYERS, NetSession, normalizeCode, PUBLIC_ROOMS, type LobbyState, type NetRules, type StartInfo } from './net/session';
+import { MAX_PLAYERS, NetSession, normalizeCode, PUBLIC_ROOMS, type GameState, type LobbyState, type NetRules, type StartInfo } from './net/session';
 
 /** What the menu remembers between visits. */
 interface Settings {
@@ -35,7 +36,9 @@ const FRAME_CAP = 60;
 const PIXEL_RATIO = 1.5;
 const VOLUME = 0.6;
 const DEFAULTS: Settings = { name: 'Player', bots: 3 };
-const RULES: NetRules = { mode: 'round', rounds: 10, pointLimit: 20, teams: 'ffa', arenaShape: 'square', startingGold: 10 };
+const RULES: NetRules = { mode: 'deathmatch', rounds: 10, pointLimit: 20, teams: 'ffa', arenaShape: 'square', startingGold: 10 };
+/** Someone joining a game in progress takes a computer player's place once there are this many warlocks. */
+const BOT_REPLACE_AT = 4;
 const DIFFICULTY: Difficulty = 'normal';
 
 function loadSettings(): Settings {
@@ -68,6 +71,8 @@ interface GameSetup {
   difficulty: Difficulty;
   localId: number;
   net?: { session: NetSession; lockstep: Lockstep };
+  /** Joining a game in progress. */
+  state?: GameState;
 }
 
 function localSetup(name: string, bots: number, rules: Partial<SimRules> = RULES): GameSetup {
@@ -107,9 +112,14 @@ class Game {
     const { players, seed } = setup;
     this.localId = setup.localId;
     this.net = setup.net;
-    this.sim = new Sim({ players, seed, rules: setup.rules });
     // Bots are deterministic, so in multiplayer every peer runs all of them rather than sending their orders.
-    this.bots = this.sim.players.filter((p) => p.isBot).map((p) => new Bot(p.id, seed ^ (p.id * 7919), setup.difficulty));
+    if (setup.state) {
+      this.sim = Sim.restore(setup.state.sim);
+      this.bots = decodeState<BotState[]>(setup.state.bots).map((b) => Bot.restore(b));
+    } else {
+      this.sim = new Sim({ players, seed, rules: setup.rules });
+      this.bots = this.sim.players.filter((p) => p.isBot).map((p) => new Bot(p.id, seed ^ (p.id * 7919), setup.difficulty));
+    }
 
     this.root = document.createElement('div');
     this.root.id = 'game';
@@ -165,10 +175,11 @@ class Game {
       onLobby: () => {
         if (this.sim.phase === 'gameOver') this.hud.message('The host is back in the lobby.', 10);
       },
-      onStart: (info, ls) => {
+      onStart: (info, ls, state) => {
         this.dispose();
-        startNetGame(session, info, ls);
+        startNetGame(session, info, ls, state);
       },
+      onJoinRequest: (name, color) => this.admit(name, color),
     };
     this.chatInput = document.createElement('input');
     this.chatInput.className = 'chat-input hidden';
@@ -194,6 +205,11 @@ class Game {
         this.hiddenLast = performance.now();
         this.stopHiddenTicker = workerInterval(30, () => {
           const now = performance.now();
+          // Alone, a hidden game waits, as it would offline.
+          if (session.alone) {
+            this.hiddenLast = now;
+            return;
+          }
           this.simulate(Math.min(0.25, (now - this.hiddenLast) / 1000));
           this.hiddenLast = now;
         });
@@ -242,9 +258,32 @@ class Game {
     this.hud.setPaused(p);
   }
 
-  /** Online the game menu doesn't stop the clock: the other players keep playing. */
+  /** Online the game menu doesn't stop the clock while anyone else is playing. */
   private get simPaused() {
-    return this.paused && !this.net;
+    return this.paused && (!this.net || this.net.session.alone);
+  }
+
+  /** Players admitted since the last turn closed, and computer players leaving to make room. */
+  private joinColors: number[] = [];
+  private botsLeaving = new Set<number>();
+
+  /** Host: someone wants to join the game in progress. Returns their player id, or why they can't. */
+  private admit(name: string, color: number): number | string {
+    const sim = this.sim;
+    if (sim.phase === 'gameOver') return 'That game has just ended.';
+    const active = sim.players.filter((p) => !p.left && !this.botsLeaving.has(p.id));
+    const total = active.length + this.joinColors.length;
+    const bot = [...active].reverse().find((p) => p.isBot);
+    if (bot && total >= BOT_REPLACE_AT) {
+      this.botsLeaving.add(bot.id);
+      this.net!.lockstep.receive({ pid: bot.id, type: 'leave' });
+    } else if (total >= MAX_PLAYERS) return 'That game is full.';
+    const used = new Set([...active.filter((p) => !this.botsLeaving.has(p.id)).map((p) => p.color), ...this.joinColors]);
+    if (used.has(color) || !PLAYER_COLORS[color]) color = PLAYER_COLORS.findIndex((_, i) => !used.has(i));
+    const pid = sim.players.length + this.joinColors.length;
+    this.joinColors.push(color);
+    this.net!.lockstep.receive({ pid, type: 'join', name, color });
+    return pid;
   }
 
   private listen<K extends keyof WindowEventMap>(target: Window | HTMLElement, type: K, fn: (e: WindowEventMap[K]) => void, opts?: AddEventListenerOptions) {
@@ -324,6 +363,10 @@ class Game {
       sound.ensure();
       const k = e.key.toUpperCase();
       this.keys.add(e.key.length === 1 ? e.key.toLowerCase() : e.key);
+      if (e.key === 'Escape' && !this.targeting && this.hud.shopOpen && this.sim.phase !== 'shop') {
+        this.hud.toggleShop();
+        return;
+      }
       if (e.key === 'F10' || (e.key === 'Escape' && !this.targeting)) {
         e.preventDefault();
         this.setPaused(!this.paused);
@@ -344,6 +387,10 @@ class Game {
         return;
       }
       if (this.paused || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (k === 'B') {
+        this.hud.toggleShop();
+        return;
+      }
       if (k === 'X') {
         this.targeting = null;
         if (this.canAct()) this.queue({ pid: this.localId, type: 'stop' });
@@ -561,6 +608,8 @@ class Game {
 
   private tick() {
     const tick = this.sim.tick;
+    // Host: this turn adds the players just admitted, who then need the state as of its end.
+    const joining = !!this.net?.lockstep.isHost && tick % TURN_TICKS === 0 && this.net.session.hasJoiners;
     let cmds: Command[];
     if (this.net) cmds = this.net.lockstep.commandsFor(tick);
     else {
@@ -570,6 +619,10 @@ class Game {
     for (const b of this.bots) cmds = cmds.concat(b.think(this.sim));
     this.sim.step(cmds);
     for (const e of this.sim.events) this.handleEvent(e);
+    if (joining) {
+      this.joinColors = [];
+      this.net!.session.sendState({ tick: this.sim.tick, sim: this.sim.snapshot(), bots: encodeState(this.bots.map((b) => b.snapshot())) });
+    }
     if (this.net && this.sim.tick % HASH_EVERY === 0) this.net.lockstep.hash(this.sim.tick, hashString(this.sim.stateHash()));
   }
 
@@ -690,9 +743,11 @@ function showLobby(session: NetSession) {
   const q = <T extends HTMLElement>(sel: string) => el.querySelector(sel) as T;
   const status = q<HTMLElement>('[data-status]');
   const render = (l: LobbyState | null) => {
-    status.textContent = l ? '' : session.isPublic ? 'Searching…' : 'Connecting…';
-    status.classList.toggle('hidden', !!l);
-    if (!l) return;
+    // `g`: the host is mid-game, and we're waiting to be let in.
+    status.textContent = !l ? (session.isPublic ? 'Searching…' : 'Connecting…') : l.g ? 'Joining…' : '';
+    status.classList.toggle('hidden', !!l && !l.g);
+    q<HTMLElement>('[data-players]').classList.toggle('hidden', !l || !!l.g);
+    if (!l || l.g) return;
     const host = hostView && session.isHost;
     q<HTMLElement>('[data-players]').innerHTML = l.slots.map((x, i) => {
       const remove = host && !x.peer ? `<button class="wc-btn small" data-rmbot="${i}">✕</button>` : '';
@@ -712,9 +767,9 @@ function showLobby(session: NetSession) {
   };
   session.events = {
     onLobby: render,
-    onStart: (info, ls) => {
+    onStart: (info, ls, state) => {
       close();
-      startNetGame(session, info, ls);
+      startNetGame(session, info, ls, state);
     },
     onRole: () => {
       close();
@@ -747,26 +802,19 @@ function showLobby(session: NetSession) {
     sound.ensure();
     sound.play('click');
     remember();
-    const humans = session.lobby?.slots.filter((x) => x.peer).length ?? 0;
-    if (humans > 1) {
-      session.startGame();
-      return;
-    }
-    // Nobody else here: play offline, so the game can pause and doesn't depend on the network.
-    const bots = session.botCount;
-    session.events.onClosed = undefined;
-    session.close();
-    close();
-    startGame(loadSettings().name, bots);
+    // Even alone with computer players the game stays online, so others can join it.
+    session.startGame();
   });
+  // Quick Play doesn't wait in a lobby: people join the game whenever they arrive.
+  if (session.isPublic && !session.inGame) session.startGame();
 }
 
-function startNetGame(session: NetSession, info: StartInfo, lockstep: Lockstep) {
+function startNetGame(session: NetSession, info: StartInfo, lockstep: Lockstep, state?: GameState) {
   sound.ensure();
   sound.setVolume(VOLUME);
   const game = new Game({
     players: info.players, seed: info.seed, rules: info.rules, difficulty: info.difficulty,
-    localId: lockstep.localId, net: { session, lockstep },
+    localId: lockstep.localId, net: { session, lockstep }, state,
   }, (again) => {
     if (again) {
       if (session.isHost) session.reopenLobby();

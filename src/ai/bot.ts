@@ -20,6 +20,8 @@ const BUILDS: ProductId[][] = [
   ['thrust', 'firespray', 'freeze', 'fireball', 'aegis', 'rangeMastery', 'thrust'],
 ];
 
+export type BotState = Record<string, unknown> & { rng: number };
+
 export class Bot {
   private rng: Rng;
   private p: (typeof PARAMS)[Difficulty];
@@ -27,6 +29,8 @@ export class Bot {
   private strafe = 1;
   private targetId = -1;
   private shopAt = -1;
+  /** Deathmatch has no shop phase, so bots shop every so often instead. */
+  private dmShopAt = -1;
   private build: ProductId[];
 
   constructor(public pid: number, seed: number, difficulty: Difficulty) {
@@ -35,20 +39,43 @@ export class Bot {
     this.build = this.rng.pick(BUILDS);
   }
 
+  /** Bots run on every peer, so a player joining mid-game needs their state too. */
+  snapshot(): BotState {
+    return { ...(this as unknown as Record<string, unknown>), rng: this.rng.state };
+  }
+
+  static restore(s: BotState): Bot {
+    const rng = new Rng(0);
+    rng.state = s.rng;
+    return Object.assign(Object.create(Bot.prototype) as Bot, { ...s, rng });
+  }
+
   think(sim: Sim): Command[] {
     const me = sim.players[this.pid];
+    if (me.left) return [];
     if (sim.phase === 'shop') return this.shop(sim, me);
     this.shopAt = -1;
-    if (sim.phase !== 'fight' || !me.alive) return [];
-    if (sim.time < this.nextThink) return [];
+    let cmds: Command[] = [];
+    if (sim.rules.mode === 'deathmatch' && sim.phase === 'fight') {
+      if (this.dmShopAt < 0) this.dmShopAt = sim.time + this.rng.range(1, 4);
+      if (sim.time >= this.dmShopAt) {
+        this.dmShopAt = sim.time + this.rng.range(6, 14);
+        cmds = this.purchases(me);
+      }
+    }
+    if (sim.phase !== 'fight' || !me.alive || sim.time < this.nextThink) return cmds;
     this.nextThink = sim.time + this.p.think * this.rng.range(0.7, 1.3);
-    return this.fight(sim, me);
+    return cmds.concat(this.fight(sim, me));
   }
 
   private shop(sim: Sim, me: Warlock): Command[] {
     if (me.ready) return [];
     if (this.shopAt < 0) this.shopAt = sim.time + this.rng.range(0.6, 4.5);
     if (sim.time < this.shopAt) return [];
+    return [...this.purchases(me), { pid: me.id, type: 'ready' }];
+  }
+
+  private purchases(me: Warlock): Command[] {
     const cmds: Command[] = [];
     const owned = { ...me.spells };
     let gold = me.gold;
@@ -77,7 +104,6 @@ export class Bot {
       buy(id, spellPrice(id, owned[id] ?? 0));
       owned[id] = (owned[id] ?? 0) + 1;
     }
-    cmds.push({ pid: me.id, type: 'ready' });
     return cmds;
   }
 

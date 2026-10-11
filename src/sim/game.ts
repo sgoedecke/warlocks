@@ -7,6 +7,7 @@ import {
   WARLOCK_HP, WARLOCK_RADIUS, WARLOCK_TURN_RATE, spellCooldown, spellPrice, type ItemId, type ProductId, type SpellId,
 } from '../config';
 import { Rng } from './rng';
+import { decodeState, encodeState } from './snapshot';
 import { dcos, datan2, dhypot, dsin } from './dmath';
 import type {
   ArenaShape, Command, FreezeState, GameEvent, Meteor, Obstacle, Phase, PlayerSetup, Projectile,
@@ -95,6 +96,8 @@ export class Sim {
   lavaTimer = LAVA_TICK;
   shrinkTimer = 999;
   deathmatchRefreshTimer = DEATHMATCH_REFRESH;
+  /** Deathmatch terrain refreshes so far, each of which paid out gold. */
+  refreshes = 0;
   private nextId = 1;
 
   constructor(opts: SimOptions) {
@@ -104,20 +107,7 @@ export class Sim {
     this.arenaShape = this.rules.arenaShape;
     this.theme = this.pickTheme();
     this.terrainTiles = Array.from({ length: TILE_COUNT * TILE_COUNT }, () => this.theme.lava);
-    this.players = opts.players.map((p, i) => {
-      const team = this.rules.teams === '2teams' ? i % 2 : (p.team ?? i);
-      return {
-        id: i, name: p.name, color: p.color, team, isBot: p.isBot,
-        x: 0, y: 0, px: 0, py: 0, vx: 0, vy: 0, mvx: 0, mvy: 0, facing: 0, pfacing: 0,
-        hp: WARLOCK_HP, maxHp: WARLOCK_HP, damagePoints: 0, alive: true, left: false, deathTime: 0, respawn: 0, diedInLava: false,
-        order: { type: 'idle' }, cast: null, spells: { fireball: 1, scourge: 1 }, chosen: {}, cooldowns: {}, gold: this.rules.startingGold, ready: false,
-        spawnProtection: SPAWN_PROTECTION, shield: 0, windwalk: 0, windwalkSpeed: 1, thrust: null, link: null, frozen: null, timeshift: null, rush: null,
-        inLava: false, terrain: this.theme.safe, lastHitBy: -1, lastHitTime: -99, contributions: [], lastCastTime: -99, lastCastSpell: null,
-        moveSpeed: WARLOCK_BASE_SPEED, BC: 1, CC: 1, DC: 1, NR: 1, RA: 0, AA: 0, IA: 0, OA: 0,
-        inventoryLevel: 1, itemSlots: [], soj: false, fireSprayFan: false, splitterContinuous: false,
-        multikillCount: 0, lastKillTime: -99, spree: 0, stats: statBlock(),
-      } satisfies Warlock;
-    });
+    this.players = opts.players.map((p, i) => this.makeWarlock(i, p));
     for (const p of this.players) p.contributions = Array.from({ length: this.players.length }, () => 0);
     this.toShopPositions();
     this.paintArena(ARENA_MB_BASE + this.players.length / 2, true);
@@ -126,6 +116,65 @@ export class Sim {
       this.phaseTimer = 0;
       this.startCombatRound(true);
     }
+  }
+
+  private makeWarlock(id: number, p: PlayerSetup): Warlock {
+    const team = this.rules.teams === '2teams' ? id % 2 : (p.team ?? id);
+    return {
+      id, name: p.name, color: p.color, team, isBot: p.isBot,
+      x: 0, y: 0, px: 0, py: 0, vx: 0, vy: 0, mvx: 0, mvy: 0, facing: 0, pfacing: 0,
+      hp: WARLOCK_HP, maxHp: WARLOCK_HP, damagePoints: 0, alive: true, left: false, deathTime: 0, respawn: 0, diedInLava: false,
+      order: { type: 'idle' }, cast: null, spells: { fireball: 1, scourge: 1 }, chosen: {}, cooldowns: {}, gold: this.rules.startingGold, ready: false,
+      spawnProtection: SPAWN_PROTECTION, shield: 0, windwalk: 0, windwalkSpeed: 1, thrust: null, link: null, frozen: null, timeshift: null, rush: null,
+      inLava: false, terrain: this.theme.safe, lastHitBy: -1, lastHitTime: -99, contributions: [], lastCastTime: -99, lastCastSpell: null,
+      moveSpeed: WARLOCK_BASE_SPEED, BC: 1, CC: 1, DC: 1, NR: 1, RA: 0, AA: 0, IA: 0, OA: 0,
+      inventoryLevel: 1, itemSlots: [], soj: false, fireSprayFan: false, splitterContinuous: false,
+      multikillCount: 0, lastKillTime: -99, spree: 0, stats: statBlock(),
+    };
+  }
+
+  /**
+   * A player joining mid-game. They get the gold and lava scaling everyone else has been given over
+   * time; in deathmatch they spawn straight away, in round mode they wait for the next round.
+   */
+  private addPlayer(c: Extract<Command, { type: 'join' }>) {
+    if (c.pid !== this.players.length) return;
+    const p = this.makeWarlock(c.pid, { name: c.name, color: c.color, isBot: false });
+    const periods = this.rules.mode === 'deathmatch' ? this.refreshes : this.round - 1;
+    p.gold += periods * GOLD_PER_ROUND;
+    p.NR += periods * LAVA_INCREASE_PER_ROUND;
+    for (const o of this.players) o.contributions.push(0);
+    p.contributions = Array.from({ length: this.players.length + 1 }, () => 0);
+    this.players.push(p);
+    if (this.rules.mode === 'deathmatch') this.respawn(p);
+    else if (this.phase === 'shop') {
+      p.x = p.px = 128 * (p.id - 6) - 64;
+      p.y = p.py = -64;
+      p.facing = p.pfacing = -Math.PI / 2;
+    } else {
+      p.alive = false;
+      p.ready = true;
+    }
+    this.events.push({ t: 'joined', pid: p.id });
+  }
+
+  /** The whole sim state, for a player joining a game in progress. */
+  snapshot(): string {
+    const { rng, obstacles, events, ...rest } = this as unknown as Record<string, unknown> & { rng: Rng; obstacles: Obstacle[] };
+    void events;
+    // The live obstacles are one of the sets, by reference.
+    const set = this.obstacleSets.indexOf(obstacles);
+    return encodeState({ ...rest, rng: rng.state, obstacleSet: set, obstacles: set < 0 ? obstacles : null });
+  }
+
+  static restore(state: string): Sim {
+    const { rng, obstacleSet, obstacles, ...rest } = decodeState<Record<string, unknown> & { rng: number; obstacleSet: number; obstacles: Obstacle[] | null }>(state);
+    const sim = Object.assign(Object.create(Sim.prototype) as Sim, rest);
+    sim.rng = new Rng(0);
+    sim.rng.state = rng;
+    sim.obstacles = obstacleSet >= 0 ? sim.obstacleSets[obstacleSet] : obstacles ?? [];
+    sim.events = [];
+    return sim;
   }
 
   get arenaRadius(): number { return this.arenaMB * TILE_SIZE; }
@@ -334,6 +383,7 @@ export class Sim {
   }
 
   private applyCommand(c: Command) {
+    if (c.type === 'join') { this.addPlayer(c); return; }
     const p = this.players[c.pid];
     if (!p || p.left) return;
     if (c.type === 'leave') { this.leave(p); return; }
@@ -472,6 +522,7 @@ export class Sim {
     this.deathmatchRefreshTimer -= DT;
     if (this.deathmatchRefreshTimer <= 0) {
       this.deathmatchRefreshTimer += DEATHMATCH_REFRESH;
+      this.refreshes++;
       this.paintArena(ARENA_MB_BASE + this.players.length / 2, true);
       this.placeObstacles();
       for (const p of this.players) { p.gold += GOLD_PER_ROUND; p.NR += LAVA_INCREASE_PER_ROUND; }

@@ -100,6 +100,7 @@ export type GameEvent =
   | { t: 'error'; pid: number; msg: string }
   | { t: 'buy'; pid: number; product: ProductId; level: number; gold: number }
   | { t: 'left'; pid: number }
+  | { t: 'joined'; pid: number }
   | { t: 'gameOver' };
 
 export type Command =
@@ -110,7 +111,9 @@ export type Command =
   | { pid: number; type: 'sell'; slot: number }
   | { pid: number; type: 'ready' }
   | { pid: number; type: 'toggle'; spell: 'firespray' | 'splitter' }
-  | { pid: number; type: 'leave' };
+  | { pid: number; type: 'leave' }
+  /** A player joining a game in progress; only the host issues it, with `pid` the next free id. */
+  | { pid: number; type: 'join'; name: string; color: number };
 
 export interface PlayerSetup { name: string; color: number; isBot: boolean; team?: number }
 
