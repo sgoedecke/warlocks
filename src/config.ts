@@ -28,7 +28,10 @@ export const GOLD_PER_KILL = 1;
 export const GOLD_PER_ASSIST = 1;
 export const GOLD_PER_WIN = 2;
 export const GOLD_MOST_DAMAGE = 1;
-export const GOLD_PER_DEATH = 2;
+/** Gold for a player's nth death this game: 4, 8, 10, 12, 14… */
+export function goldForDeath(n: number) {
+  return n <= 1 ? 4 : 2 * n + 4;
+}
 export const POINT_PER_KILL = 1;
 export const POINT_PER_ASSIST = 1;
 export const POINT_PER_WIN = 2;

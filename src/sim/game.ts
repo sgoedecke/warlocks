@@ -1,10 +1,10 @@
 import {
   ARENA_MB_BASE, CAST_POINT, COUNTDOWN_TIME, DEATHMATCH_REFRESH, DT, GOLD_MOST_DAMAGE,
-  GOLD_PER_ASSIST, GOLD_PER_DEATH, GOLD_PER_KILL, GOLD_PER_ROUND, GOLD_PER_WIN, ICE_TILE, ITEMS, LAVA_DAMAGE_PER_TICK,
+  GOLD_PER_ASSIST, GOLD_PER_KILL, GOLD_PER_ROUND, GOLD_PER_WIN, ICE_TILE, ITEMS, LAVA_DAMAGE_PER_TICK,
   LAVA_INCREASE_PER_ROUND, LAVA_TICK, MAP_MAX, MAP_MIN, MODEL_PATHS, OBSTACLE_RADIUS, POINT_PER_ASSIST,
   POINT_PER_KILL, POINT_PER_WIN, RESPAWN_TIME, ROUND_END_TIME, SHOP_TIME, SHRINK_CR, SOUND_PATHS,
   SPAWN_PROTECTION, SPELLS, START_GOLD, TERRAIN_MIN, TERRAIN_THEMES, TILE_COUNT, TILE_SIZE, WARLOCK_BASE_SPEED,
-  WARLOCK_HP, WARLOCK_RADIUS, WARLOCK_TURN_RATE, spellCooldown, spellPrice, type ItemId, type ProductId, type SpellId,
+  WARLOCK_HP, WARLOCK_RADIUS, WARLOCK_TURN_RATE, goldForDeath, spellCooldown, spellPrice, type ItemId, type ProductId, type SpellId,
 } from '../config';
 import { Rng } from './rng';
 import { decodeState, encodeState } from './snapshot';
@@ -1008,7 +1008,7 @@ export class Sim {
     let assist = -1, assistDamage = 0;
     p.contributions.forEach((d, i) => { if (i !== killer && i !== p.id && d > assistDamage) { assistDamage = d; assist = i; } });
     if (killer >= 0) this.awardKill(killer, p, assist);
-    p.gold += GOLD_PER_DEATH; this.events.push({ t: 'bounty', pid: p.id, gold: GOLD_PER_DEATH, x: p.x, y: p.y });
+    const deathGold = goldForDeath(p.stats.deaths); p.gold += deathGold; this.events.push({ t: 'bounty', pid: p.id, gold: deathGold, x: p.x, y: p.y });
     this.events.push({ t: 'death', pid: p.id, killer, assist, x: p.x, y: p.y, inLava: p.inLava, modelPath: MODEL_PATHS.doomDeath });
     if (this.rules.mode === 'deathmatch') { p.respawn = RESPAWN_TIME; p.stats.points -= 1; }
   }
