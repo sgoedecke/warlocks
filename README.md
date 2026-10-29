@@ -59,7 +59,7 @@ Everything is drawn in code or comes from openly licensed models, icons and font
 
 **Host Game** opens a private lobby with a room code and a **Copy link** button (`?join=CODE`). Friends enter the code under **Join** or open the link, before or after the host starts. Up to 10 players can take part, humans and computers combined. Hosted games stay online even with only computer players, so friends can still join; a host alone can pause.
 
-Games are deathmatch (the original's `-dm`), free for all, on the square arena: dead warlocks respawn after 10 s, a kill or assist is worth a point and a death costs one, and the first to 20 points wins. Everyone starts with 10 gold and gets 10 more with each terrain refresh (every 3 minutes). The shop opens with `B` or the **Shop** button, and by itself while you wait to respawn. The sim still supports the map's other modes (rounds, teams, circular arena), but the menu doesn't offer them.
+Games are deathmatch (the original's `-dm`), free for all, on the square arena: dead warlocks respawn after 10 s, a kill or assist is worth a point and a death costs one, and the first to 20 points wins. Everyone starts with 10 gold and gets 40 more with each terrain refresh (every 3 minutes). The shop opens with `B` or the **Shop** button, and by itself while you wait to respawn. The sim still supports the map's other modes (rounds, teams, circular arena), but the menu doesn't offer them.
 
 How it works:
 
