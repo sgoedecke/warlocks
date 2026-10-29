@@ -238,6 +238,7 @@ export class Hud {
   private overlayW = 0;
   private overlayH = 0;
   private overlayFont = '';
+  private nameFont = '';
 
   private resize() {
     const dpr = Math.min(window.devicePixelRatio, 2);
@@ -247,6 +248,7 @@ export class Hud {
     this.overlay.height = this.overlayH * dpr;
     this.og.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.overlayFont = `bold 16px ${getComputedStyle(document.body).fontFamily}`;
+    this.nameFont = `bold 13px ${getComputedStyle(document.body).fontFamily}`;
   }
 
   private buildCommandCard(card: HTMLElement) {
@@ -678,6 +680,14 @@ export class Hud {
       g.fillRect(x, y, Math.round(bw * f), bh);
       g.fillStyle = 'rgba(255,255,255,0.25)';
       g.fillRect(x, y, Math.round(bw * f), 2);
+      g.font = this.nameFont;
+      g.textAlign = 'center';
+      g.lineJoin = 'round';
+      g.lineWidth = 3;
+      g.strokeStyle = '#000';
+      g.strokeText(p.name, s.x, y - 5);
+      g.fillStyle = PLAYER_COLORS[p.color].css;
+      g.fillText(p.name, s.x, y - 5);
     }
     // Floating bounty text
     g.font = this.overlayFont;
