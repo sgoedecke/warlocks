@@ -754,6 +754,25 @@ body {
   line-height: 1.45;
 }
 
+.join-prompt-label {
+  text-align: center;
+  color: #c8a060;
+  font-size: 18px;
+}
+
+.join-prompt-label b {
+  color: #fff;
+  letter-spacing: 3px;
+}
+
+#menu .join-prompt .buttons {
+  margin: 4px 0 0;
+}
+
+#menu .join-prompt .buttons .wc-btn {
+  flex: 1;
+}
+
 #menu .lobby-panel {
   width: 420px;
   margin-top: 24px;

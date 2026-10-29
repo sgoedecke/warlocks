@@ -714,6 +714,52 @@ function showMenu(notice = '') {
   codeInput.addEventListener('keydown', (e) => e.key === 'Enter' && join());
 }
 
+/** Arriving by invite link: ask for a name before joining the game. */
+function showJoinPrompt(code: string) {
+  const s = loadSettings();
+  const menu = document.createElement('div');
+  menu.id = 'menu';
+  menu.innerHTML = `
+    <div class="title">WARLOCKS</div>
+    <form class="panel frame main-menu join-prompt">
+      <div class="join-prompt-label">Joining game <b>${escapeHtml(code)}</b></div>
+      <input data-name maxlength="16" spellcheck="false" autocomplete="off" placeholder="Enter your name">
+      <div class="buttons">
+        <button type="button" class="wc-btn big" data-back>Back</button>
+        <button type="submit" class="wc-btn big" data-join>Join</button>
+      </div>
+    </form>`;
+  app.appendChild(menu);
+  const q = <T extends HTMLElement>(sel: string) => menu.querySelector<T>(sel)!;
+  const nameInput = q<HTMLInputElement>('[data-name]');
+  const joinBtn = q<HTMLButtonElement>('[data-join]');
+  // Returning players keep the name they chose before; newcomers have to pick one.
+  nameInput.value = s.name === DEFAULTS.name ? '' : s.name;
+  const update = () => (joinBtn.disabled = !nameInput.value.trim());
+  update();
+  nameInput.addEventListener('input', update);
+  nameInput.focus();
+  const leave = () => {
+    sound.ensure();
+    sound.setVolume(VOLUME);
+    sound.play('click');
+    menu.remove();
+  };
+  q('form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const name = nameInput.value.trim();
+    if (!name) return nameInput.focus();
+    s.name = name;
+    saveSettings(s);
+    leave();
+    showLobby(NetSession.join(code, { name, color: 0 }));
+  });
+  q('[data-back]').addEventListener('click', () => {
+    leave();
+    showMenu();
+  });
+}
+
 /** Quick Play: try public room `n`, moving to the next one if its game has started. */
 function quickPlay(n: number, me: { name: string; color: number }) {
   showLobby(NetSession.public(n, me, RULES, DIFFICULTY));
@@ -850,7 +896,8 @@ async function boot() {
   if (joinCode) {
     const name = new URLSearchParams(location.search).get('name');
     history.replaceState(null, '', location.pathname);
-    showLobby(NetSession.join(joinCode, { name: (import.meta.env.DEV && name) || loadSettings().name, color: 0 }));
+    if (import.meta.env.DEV && name) showLobby(NetSession.join(joinCode, { name, color: 0 }));
+    else showJoinPrompt(normalizeCode(joinCode));
   } else if (import.meta.env.DEV && new URLSearchParams(location.search).has('public')) {
     const p = new URLSearchParams(location.search);
     quickPlay(Number(p.get('public')) || 1, { name: p.get('name') ?? loadSettings().name, color: 0 });
