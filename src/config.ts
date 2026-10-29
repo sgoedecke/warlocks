@@ -28,6 +28,7 @@ export const GOLD_PER_KILL = 1;
 export const GOLD_PER_ASSIST = 1;
 export const GOLD_PER_WIN = 2;
 export const GOLD_MOST_DAMAGE = 1;
+export const GOLD_PER_DEATH = 2;
 export const POINT_PER_KILL = 1;
 export const POINT_PER_ASSIST = 1;
 export const POINT_PER_WIN = 2;
